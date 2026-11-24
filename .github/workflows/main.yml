@@ -1,32 +1,39 @@
-name: Build OS Kernel
+name: Build and verify Z-OS
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
-  build-nasm:
+  verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-    - uses: actions/checkout@v3
-    - name: Install Dependencies
-      run: sudo apt-get update && sudo apt-get install -y nasm gcc gcc-multilib
-    - name: Compile Bootloader
-      run: nasm -f bin boot.asm -o boot.bin
-    - name: Compile Kernel ASM
-      run: nasm -f elf32 kernel.asm -o kernel_asm.o
-    - name: Compile Kernel C
-      run: gcc -m32 -ffreestanding -c kernel.c -o kernel_c.o
-    - name: Link Kernel
-      run: ld -m elf_i386 -Ttext 0x1000 kernel_asm.o kernel_c.o -o kernel.elf
-    - name: Convert to Binary
-      run: objcopy -O binary kernel.elf kernel.bin
-    - name: Assemble Image
-      run: |
-        dd if=/dev/zero of=os.img bs=1M count=1
-        dd if=boot.bin of=os.img conv=notrunc
-        dd if=kernel.bin of=os.img bs=512 seek=1 conv=notrunc
-    - name: Verify Image Size
-      run: ls -l os.img
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nasm clang lld qemu-system-x86 python3
+
+      - name: Build kernel and images
+        run: python3 tools/build.py
+
+      - name: Run automated verification
+        run: python3 tools/verify.py all --skip-build
+
+      - name: Upload boot image and logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: z-os-build
+          path: |
+            build/z-os.img
+            build/z-os-test.img
+            build/manifest.json
+            build/selftest.log
+            build/smoke.log
