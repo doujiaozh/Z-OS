@@ -9,18 +9,24 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.2.0 is the ELF stage. It boots, manages memory, runs preemptive kernel
-threads, hosts a VFS and shell, loads a static ELF64 C program into Ring 3,
-and verifies itself under QEMU. The process model, persistent storage,
-networking, SMP, and compatibility layers remain future work.
+Z-OS 0.3.0 is the Process stage. It boots, manages memory, runs preemptive
+kernel threads, hosts a VFS and shell, loads static ELF64 processes into
+private PML4 address spaces, shares a kernel high-half direct map, provides a
+process table with a ready queue, and verifies itself under QEMU. Concurrent
+user-process scheduling, true fork continuation, and blocking wait are not
+complete.
 
 ## Phase 1 execution status
 
 | Milestone | Status | Release |
 | --- | --- | --- |
 | Static ELF64 loader and minimal C user program | Implemented and verified | v0.2.0-elf |
-| Per-process page tables and address-space switch | Planned, next | v0.3.0-process |
-| Process table with `fork`, `exec`, `wait`, and `exit` | Planned | Phase 1 |
+| Per-process page tables and address-space switch | Implemented and verified | v0.3.0-process |
+| Process table, PID allocation, parent links, ready queue | Implemented and verified | v0.3.0-process |
+| Shared kernel high-half direct map | Implemented and verified | v0.3.0-process |
+| Fork clone, image replacement, exit, and zombie reaping | Implemented and verified | v0.3.0-process |
+| Preemptive user-process scheduling and true fork continuation | Planned, next | v0.4.0-scheduler |
+| Blocking wait queues and process credentials | Planned | Phase 1 |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -30,23 +36,23 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.2.0 ELF | Needed for general purpose |
+| Domain | 0.3.0 Process | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
-| Memory | Frame bitmap, 4-level paging, heap | VMA tracking, demand paging, COW, swap, NUMA, slab allocators |
-| Processes | Static ELF64 loader and one C user program | Per-process address spaces, process table, fork/exec/wait, signals, credentials |
+| Memory | Frame bitmap, per-process PML4, high-half direct map, heap | VMA tracking, demand paging, COW, swap, NUMA, slab allocators |
+| Processes | Process table, ready queue, isolated PML4, synchronous ELF runs | Preemptive user scheduling, true fork, blocking wait, signals, credentials |
 | Threads | Preemptive kernel round-robin | User threads, priorities, affinity, futexes, real-time classes |
 | VFS | Ramfs, 128 nodes, global lock | Mounts, dcache, inode cache, page cache, permissions, quotas |
 | Storage | None | ATA, NVMe, virtio-blk, partitioning, journaling FS, fsck |
 | Networking | None | PCI NIC drivers, ARP, IPv4/IPv6, UDP/TCP, sockets, DNS, TLS |
-| Graphics | VGA text | Framebuffer, compositor, fonts, mouse, GPU drivers, acceleration |
-| Security | Ring 3, user/supervisor pages | NX, SMEP, SMAP, W^X, KASLR, ASLR, capabilities, MAC, audit |
+| Graphics | Framebuffer interface and display registry | Framebuffer driver, compositor, fonts, mouse, GPU drivers, acceleration |
+| Security | Ring 3, per-process user pages | NX, SMEP, SMAP, W^X, KASLR, ASLR, capabilities, MAC, audit |
 | Power | QEMU-compatible ACPI power request | ACPI parser, S3/S4, thermal, battery, cpufreq, idle governors |
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
-| ABI | Five custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
+| ABI | Eight custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 49 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 73 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -79,6 +85,12 @@ Acceptance criteria:
 
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
+
+v0.3.0-process delivered the private PML4 address-space layer, the shared
+high-half direct map, the process table, the ready queue, synchronous ELF
+process execution, address-space cloning, the process-manager fork/exec/wait
+paths, and the framebuffer/display interface. The remaining items below move
+the process model to preemptive scheduling and full POSIX-style semantics.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -281,12 +293,15 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Implement per-process PML4 trees and switch address spaces around Ring 3.
-2. Add a process table and the first `fork`, `exec`, `wait`, and `exit` paths.
-3. Add a file-descriptor table and extend the syscall interface.
-4. Add a kernel/user test harness that runs multiple independent ELF binaries.
-5. Complete the 0.2 hardening backlog: guard pages, reference counts, stack
-   traces, and ACPI table parsing.
+1. Integrate process execution with the kernel-thread scheduler so multiple
+   user processes run preemptively under per-process CR3 and interrupt stacks.
+2. Add true fork continuation from the saved user register frame, plus blocking
+   wait queues and parent wakeups.
+3. Add a file-descriptor table, user heap, argv/envp, and static PIE support.
+4. Add a framebuffer driver and framebuffer console on top of the display
+   registry.
+5. Complete the 0.2 hardening backlog: guard pages, VFS reference counts,
+   stack traces, and ACPI table parsing.
 6. Add PCI enumeration and a persistent disk driver.
 7. Build the first user-space init and libc.
 

@@ -34,6 +34,8 @@ CFLAGS = [
     "-O2",
     "-g",
     "-Ikernel/include",
+    "-Ikernel/mm",
+    "-Ikernel/task",
 ]
 USER_CFLAGS = [
     "--target=x86_64-none-elf",

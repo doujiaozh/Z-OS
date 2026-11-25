@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.2.0 ELF |
+| Version | 0.3.0 Process |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -46,23 +46,26 @@ The build produces:
 - `build/user_init.elf`
 - `build/manifest.json`
 
-The loader enforces a 320 KiB kernel slot. The 0.2.0 kernel occupies
-approximately 59 KiB of the slot, leaving room for additional subsystems. The
+The loader enforces a 320 KiB kernel slot. The 0.3.0 kernel occupies
+approximately 72 KiB of the slot, leaving room for additional subsystems. The
 image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and the
 user ELF are written to `build/manifest.json` after every build.
 
 ## Self-test result
 
-The self-test image executes 49 checks and exits QEMU through the ISA debug
+The self-test image executes 73 checks and exits QEMU through the ISA debug
 exit device. A successful run returns host exit status 33, which is
 `(0x10 << 1) | 1`. A failure returns 35.
 
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=49 failed=0
+ZTEST SUMMARY passed=73 failed=0
 ZTEST RESULT PASS
 ```
+
+The original 49 checks remain in place. This milestone adds 20 process,
+address-space, high-half, and lifecycle checks plus 4 display registry checks.
 
 Test coverage by area:
 
@@ -77,9 +80,12 @@ Test coverage by area:
 | Time | RTC field sanity, timer progress across a sleep |
 | Scheduler | Thread creation, preemptive completion, atomic counter correctness |
 | ELF64 | Embedded image validation, entry and segments, bad magic, truncation, W^X rejection, address range rejection |
-| User mode | Ring-3 C program, syscall write, syscall exit, return to kernel |
+| Address spaces | Distinct PML4 roots, distinct user frames, cross-space invisibility, high-half identity, high-alias translation |
+| Processes | Creation, PID/parent links, fork clone, exec image replacement, exit status, wait reaping, table drain |
+| Display | Framebuffer registration, lookup, primary selection, count, unregistration |
+| User mode | Ring-3 C program in a per-process address space, syscall write, syscall exit, return to kernel |
 
-The user-mode portion produces the following serial output:
+The user-mode test path produces the following serial output:
 
 ```text
 User: loaded ELF64 entry 0x40000000 with 2 segments, stack 0x40010000
@@ -89,6 +95,11 @@ User syscall return path verified
 C ELF64 user program checksum verified
 ELF64 BSS zero check verified
 ```
+
+The process test additionally runs two instances of the same ELF image in
+separate address spaces and produces two runs of the user program output. The
+high-half direct map at 0xFFFFFFFF80000000 is identical in both process PML4
+trees and resolves the kernel image physical address.
 
 ## Boot smoke test
 
@@ -135,12 +146,18 @@ the shell over COM1. The following commands and properties are checked:
 - `uptime` advances.
 - `ps` shows the init and shell threads.
 - `rand` produces random bytes.
-- `usertest` validates the embedded ELF, loads text and data pages, enters
-  Ring 3, verifies a checksum and zeroed BSS, and exits with status 0.
-- The shell reports `user program exited with status 0`.
+- `usertest` creates a process with a private PML4, maps the embedded ELF,
+  enters Ring 3 under the process CR3, verifies a checksum and zeroed BSS,
+  exits with status 0, and cleans up through wait.
 - `cat /README` reads the boot filesystem image.
 - `shutdown` issues the ACPI PM1a power request and makes QEMU exit with
   status 0.
+
+The shell observes the process-mode line:
+
+```text
+User: entering ring 3 in process address space 0x93e000
+```
 
 The test fails on unexpected panic, exception, or unknown-command output.
 
@@ -179,9 +196,14 @@ rebuilds first unless `--skip-build` is supplied.
 
 - Physical hardware.
 - SMP, APIC, or multi-core interrupt behavior.
-- Per-process address spaces, multiple user processes, `fork`, `exec`, `wait`,
-  signals, or a file-descriptor table.
-- Static PIE relocation, dynamic linking, libc, argv, or environment strings.
+- Preemptive or concurrent user-process scheduling. Processes are executed
+  synchronously and sequentially in this milestone.
+- True fork continuation at the parent's saved user instruction pointer.
+- Blocking wait queues, signals, process credentials, or a file-descriptor table.
+- Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
+- The kernel executing from the high-half direct map. The high-half window is
+  mapped and tested, while kernel text still executes through the low identity
+  window.
 - Long-running stability beyond the boot tests.
 - Disk persistence, networking, USB, audio, graphics acceleration, or GPU.
 - Windows, Linux, or macOS binary compatibility.
@@ -190,4 +212,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.2.0 test run.
+passing 0.3.0 test run.

@@ -82,6 +82,41 @@ int user_run_demo(u64 *exit_code) {
     return 0;
 }
 
+int user_run_in_address_space(struct address_space *space, u64 entry, u64 user_stack, u64 *exit_code) {
+    if (space == NULL || !space->ready || user_active) {
+        return -4;
+    }
+    if (entry == 0 || user_stack == 0) {
+        return -1;
+    }
+    user_active = true;
+    user_exit_code = 0xFFFFFFFFFFFFFFFFULL;
+    u64 previous_cr3 = read_cr3() & PTE_ADDRESS;
+    sched_preempt_disable();
+    u64 previous_stack = tss_get_rsp0();
+    tss_set_rsp0((u64)user_interrupt_stack + sizeof(user_interrupt_stack));
+    if (vmm_switch_address_space(space) != 0) {
+        tss_set_rsp0(previous_stack);
+        sched_preempt_enable();
+        user_active = false;
+        return -3;
+    }
+    kprintf("User: entering ring 3 in process address space %p\n", (void *)space->pml4_phys);
+    user_enter_and_wait(entry, user_stack);
+    write_cr3(previous_cr3);
+    tss_set_rsp0(previous_stack);
+    sched_preempt_enable();
+    interrupts_enable();
+    user_active = false;
+    if (exit_code != NULL) {
+        *exit_code = user_exit_code;
+    }
+    if (user_exit_code == 0xFFFFFFFFFFFFFFFFULL) {
+        return -5;
+    }
+    return 0;
+}
+
 void user_finish(u64 status) {
     if (!user_active) {
         panic("user exit requested outside user mode");

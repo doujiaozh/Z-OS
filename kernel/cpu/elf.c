@@ -171,3 +171,66 @@ rollback:
     }
     return result;
 }
+
+int elf_load_into(struct address_space *space, const void *image, u64 size, u64 *entry) {
+    if (space == NULL || entry == NULL || !space->ready) {
+        return ELF_ERROR_INVALID;
+    }
+    u64 image_entry = 0;
+    int result = elf_validate(image, size, &image_entry, NULL);
+    if (result != ELF_OK) {
+        return result;
+    }
+    const u8 *bytes = image;
+    struct elf64_header header;
+    memcpy(&header, bytes, sizeof(header));
+    u64 mapped_addresses[ELF_MAX_LOAD_PAGES];
+    u64 mapped_frames[ELF_MAX_LOAD_PAGES];
+    u32 mapped_count = 0;
+    for (u32 index = 0; index < header.program_count; index++) {
+        struct elf64_program_header program;
+        u64 program_address = header.program_offset + (u64)index * sizeof(program);
+        memcpy(&program, bytes + program_address, sizeof(program));
+        if (program.type != ELF_PROGRAM_LOAD || program.memory_size == 0) {
+            continue;
+        }
+        u64 pages = (program.memory_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        for (u64 page = 0; page < pages; page++) {
+            u64 frame = pmm_alloc_frame();
+            if (frame == 0) {
+                result = ELF_ERROR_MEMORY;
+                goto rollback_as;
+            }
+            u64 segment_offset = page * PAGE_SIZE;
+            if (segment_offset < program.file_size) {
+                u64 copy_length = program.file_size - segment_offset;
+                if (copy_length > PAGE_SIZE) {
+                    copy_length = PAGE_SIZE;
+                }
+                memcpy((void *)frame, bytes + program.offset + segment_offset, (usize)copy_length);
+            }
+            u64 page_flags = PTE_PRESENT | PTE_USER;
+            if ((program.flags & ELF_FLAG_WRITE) != 0) {
+                page_flags |= PTE_WRITABLE;
+            }
+            u64 virtual_address = program.virtual_address + page * PAGE_SIZE;
+            if (vmm_map_user_page(space, virtual_address, frame, page_flags) != 0) {
+                pmm_free_frame(frame);
+                result = ELF_ERROR_MEMORY;
+                goto rollback_as;
+            }
+            mapped_addresses[mapped_count] = virtual_address;
+            mapped_frames[mapped_count] = frame;
+            mapped_count++;
+        }
+    }
+    *entry = image_entry;
+    return ELF_OK;
+
+rollback_as:
+    for (u32 index = mapped_count; index > 0; index--) {
+        vmm_unmap_user_page(space, mapped_addresses[index - 1]);
+        pmm_free_frame(mapped_frames[index - 1]);
+    }
+    return result;
+}

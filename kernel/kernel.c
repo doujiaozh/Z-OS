@@ -9,6 +9,7 @@
 #include "lib.h"
 #include "pmm.h"
 #include "pic.h"
+#include "process.h"
 #include "rtc.h"
 #include "serial.h"
 #include "shell.h"
@@ -42,6 +43,7 @@ void kmain(struct boot_info *boot) {
     vmm_init();
     heap_init();
     vfs_init();
+    process_init();
     sched_init();
 
     timer_init(TIMER_FREQUENCY);

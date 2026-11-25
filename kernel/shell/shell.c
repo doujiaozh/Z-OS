@@ -6,6 +6,7 @@
 #include "lib.h"
 #include "pmm.h"
 #include "power.h"
+#include "process.h"
 #include "rtc.h"
 #include "string.h"
 #include "thread.h"
@@ -200,7 +201,7 @@ static void command_help(void) {
     kprintf("  sleep <ms>           sleep for milliseconds\n");
     kprintf("  history              show command history\n");
     kprintf("  rand [bytes]         print random bytes\n");
-    kprintf("  usertest             load and run the static ELF64 C program\n");
+    kprintf("  usertest             load and run an ELF64 process in a new address space\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -208,8 +209,8 @@ static void command_help(void) {
 static void command_about(void) {
     kprintf("Z-OS %s %s\n", Z_OS_VERSION, Z_OS_CODENAME);
     kprintf("A compact x86_64 operating system with a preemptive kernel,\n");
-    kprintf("virtual memory, ramfs, static ELF64 loading, ring-3 syscalls,\n");
-    kprintf("and a serial console.\n");
+    kprintf("per-process address spaces, a shared high-half map, static ELF64\n");
+    kprintf("loading, ring-3 syscalls, and a serial console.\n");
 }
 
 static void command_uname(void) {
@@ -533,6 +534,7 @@ static void command_ps(void) {
                 statuses[index].cpu_ticks, statuses[index].stack_size / 1024,
                 statuses[index].name);
     }
+    kprintf("processes: %llu total, %llu ready\n", process_count(), process_ready_count());
 }
 
 static void command_sleep(int argc, char *arguments[]) {
@@ -620,13 +622,22 @@ static void command_rand(int argc, char *arguments[]) {
 }
 
 static void command_usertest(void) {
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *process = process_create("usertest", 0, user_program_start, image_size);
+    if (process == NULL) {
+        kprintf("user program failed to start (%d)\n", PROCESS_ERROR_MEMORY);
+        return;
+    }
+    u64 pid = process->pid;
     u64 exit_code = 0;
-    int result = user_run_demo(&exit_code);
+    int result = process_run(pid, &exit_code);
+    u64 status = 0;
+    process_wait(0, pid, &status);
     if (result != 0) {
         kprintf("user program failed to start (%d)\n", result);
         return;
     }
-    kprintf("user program exited with status %llu\n", exit_code);
+    kprintf("user program exited with status %llu\n", status);
 }
 
 static void execute_command(int argc, char *arguments[]) {

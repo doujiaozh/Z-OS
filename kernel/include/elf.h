@@ -3,6 +3,8 @@
 
 #include "types.h"
 
+struct address_space;
+
 #define ELF_MAGIC_0 0x7F
 #define ELF_MAGIC_1 'E'
 #define ELF_MAGIC_2 'L'
@@ -64,5 +66,6 @@ struct elf64_program_header {
 
 int elf_validate(const void *image, u64 size, u64 *entry, u32 *segment_count);
 int elf_load(const void *image, u64 size, u64 *entry);
+int elf_load_into(struct address_space *space, const void *image, u64 size, u64 *entry);
 
 #endif

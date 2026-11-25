@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.2.0 implementation as it exists in this
+This document describes the Z-OS 0.3.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.2.0:
+Non-goals for 0.3.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -40,6 +40,11 @@ Non-goals for 0.2.0:
 The loader and kernel currently assume one processor. Interrupt controllers
 are the legacy 8259 PIC pair and the legacy PIT. ACPI tables are not parsed.
 A QEMU-compatible ACPI PM1a power request is issued for shutdown.
+
+The kernel image executes through the low identity window at 1 MiB. Every
+process address space also contains a shared supervisor-only direct map of
+the first 1 GiB at 0xFFFFFFFF80000000. This establishes the kernel high-half
+window without relocating kernel text execution yet.
 
 ## Boot sequence
 
@@ -124,11 +129,12 @@ BSS. It never allocates a frame above the boot identity map.
 | Range | Use |
 | --- | --- |
 | 0x0000000000000000 to 0x000000003FFFFFFF | Identity map of physical memory |
-| 0x0000000040000000 to 0x000000004000FFFF | Static ELF64 segment window |
-| 0x0000000040010000 to 0x0000000040010FFF | Ring-3 stack |
+| 0x0000000040000000 to 0x000000004000FFFF | Per-process ELF64 segment window |
+| 0x0000000040010000 to 0x0000000040010FFF | Per-process Ring-3 stack |
 | 0x0000000050000000 | Self-test scratch mapping |
 | 0x0000000060000000 to 0x00000000607FFFFF | 8 MiB kernel heap |
 | 0x0000000070000000 | Self-test scratch mapping |
+| 0xFFFFFFFF80000000 to 0xFFFFFFFFBFFFFFFF | Shared kernel high-half direct map |
 
 The initial page tables map 1 GiB with 2 MiB pages. `vmm_map_page` splits a
 2 MiB mapping into a 4 KiB page table when a finer mapping is requested. New
@@ -138,6 +144,16 @@ through the identity map.
 The kernel heap is placed outside the 1 GiB identity window so that mapping
 heap pages never aliases a physical frame that the allocator might need to
 clear through its identity address.
+
+Each process PML4 has three top-level regions:
+
+- PML4[0] points to a private PDPT. PDPT[0] shares the kernel low identity
+  page directory for 0 to 1 GiB. PDPT[1] points to a private user page
+  directory for 1 to 2 GiB.
+- The private user page directory holds ELF pages and the user stack with the
+  user bit set. Entries 256 through 259 are copied from the boot address space
+  to share the supervisor-only 8 MiB kernel heap mapping.
+- PML4[511] points to a shared high-half PDPT and a shared 1 GiB direct map.
 
 ## Physical memory manager
 
@@ -152,18 +168,34 @@ clear through its identity address.
 ## Virtual memory manager
 
 - Four-level x86_64 page tables.
-- `vmm_map_page` and `vmm_unmap_page` operate on 4 KiB pages.
+- `vmm_map_page` and `vmm_unmap_page` operate on 4 KiB pages in the boot
+  address space.
+- `vmm_create_address_space` allocates a private PML4, PDPT, and user page
+  directory, installs shared kernel mappings, and copies shared heap entries.
+- `vmm_switch_address_space` writes CR3. `vmm_switch_kernel` restores the boot
+  PML4.
+- `vmm_map_user_page` and `vmm_unmap_user_page` map only the fixed user window
+  in a specified process address space.
+- `vmm_clone_address_space` deep-copies user pages into new physical frames
+  and page tables while sharing supervisor kernel mappings.
+- `vmm_destroy_address_space` frees user frames, user page tables, the user
+  page directory, the PDPT, and the PML4. Shared kernel tables are not freed.
 - Intermediate tables are allocated and zeroed on demand.
 - 2 MiB PD entries are split into page tables while preserving base flags.
 - Kernel mappings are supervisor-only. Ring-3 mappings set the user bit at
   every level.
-- TLB entries are invalidated with `INVLPG`.
-- The current address space is the boot address space; user mode shares it.
+- TLB entries are invalidated with `INVLPG` when a mapping is changed in the
+  active address space.
 
 `vmm_get_physical` supports 1 GiB, 2 MiB, and 4 KiB leaf entries.
-`vmm_user_range_valid` walks the page table for every page in a range and
-requires the user bit at all levels. It is used by syscalls before kernel
-code touches a user pointer.
+`vmm_user_range_valid` and `vmm_user_range_valid_in` walk page tables for
+every page in a range and require the user bit at all levels. Syscalls use
+these checks before touching user pointers.
+
+The high-half direct map is built during `vmm_init` from two PMM frames. It
+maps physical memory 0 to 1 GiB with 2 MiB pages and is shared by every
+process through PML4[511]. It is verified by translation and by reading the
+kernel image through the high alias.
 
 ## Kernel heap
 
@@ -210,13 +242,66 @@ may context switch.
   thread reaps zombie stacks in its idle loop.
 - `sched_sleep_ms` puts a thread to sleep until a tick deadline. The timer
   interrupt wakes it.
-- A preemption-disable depth protects console output and the synchronous
-  user-mode demo from scheduler switches. Interrupts remain enabled so the
-  serial FIFO can drain.
-- `tss_set_rsp0` is updated on each context switch for future ring-3 work.
+- A preemption-disable depth protects console output and synchronous
+  user-process execution from scheduler switches. Interrupts remain enabled
+  so the serial FIFO can drain.
+- `tss_set_rsp0` is updated on context switches. The synchronous process
+  runner also points TSS.RSP0 at its dedicated interrupt stack.
 
 There is no SMP scheduler, no priority scheduling, no CPU affinity, and no
 work stealing. The design is deliberately uniprocessor.
+
+## Processes and address spaces
+
+`kernel/task/process.c` implements a process table of 32 control blocks.
+Each process has a PID, parent PID, state, name, private address space, ELF
+entry, user stack, exit status, and ready-queue link. PID zero represents the
+kernel. The ready queue is a FIFO of ready process objects.
+
+Process creation:
+
+1. Allocate a PCB and PID.
+2. Create a private PML4 address space with shared kernel mappings.
+3. Validate and load the embedded ELF64 image into that address space.
+4. Map a private user stack page.
+5. Mark the PCB ready and append it to the ready queue.
+
+`process_run` removes a ready process from the queue, sets the current process
+PID, switches CR3 to its PML4, and enters Ring 3 through the shared TSS
+interrupt stack. The scheduler is disabled during this synchronous run. On
+system-call exit or user exception, the kernel restores the pre-run CR3 and
+marks the process zombie with its exit status.
+
+Address-space objects support create, switch, clone, map, unmap, validate, and
+destroy. Cloning deep-copies every present user page into new physical frames
+and page tables. Kernel low memory, the kernel heap, and the high-half direct
+map remain shared supervisor mappings.
+
+Process-manager operations:
+
+- `process_fork` allocates a child PCB and deep-clones the parent address
+  space. The child is queued ready.
+- `process_exec` creates a new address space, reloads the embedded image, and
+  destroys the old address space for a non-running process.
+- `process_exec_current` can replace the active synchronous process image and
+  switch CR3 from the syscall path.
+- `process_exit` records a zombie status and removes a ready process from the
+  queue.
+- `process_wait` reaps a zombie child, returns its status, and frees its
+  address space and PCB.
+
+Important limits:
+
+- User processes are executed one at a time by the shell or tests. The ready
+  queue is not yet consumed by the kernel-thread scheduler.
+- `fork` in this milestone creates an independent ready child from the parent
+  image; it does not resume the child at the parent's saved instruction after
+  the fork system call.
+- `wait` is nonblocking for syscall use: it reaps zombies and returns an error
+  if no child has exited.
+- `exec` has no path lookup and reloads only the embedded ELF image.
+- There are no credentials, file-descriptor tables, signals, or per-process
+  kernel stacks.
 
 ## VFS and ramfs
 
@@ -269,26 +354,36 @@ The loader copies file-backed bytes into newly allocated physical frames
 before mapping. Bytes beyond `p_filesz` remain zero because the PMM zeroes
 frames. Read-only segments are mapped without PTE_WRITABLE; writable segments
 receive the write bit. On failure, all pages mapped by that load are unmapped
-and freed.
+and freed. `elf_load_into` performs the same operations against a specified
+process address space using `vmm_map_user_page`.
 
 The user stack is a separate writable page at 0x40010000. Initial RSP is
 0x40010FF8 so the stack pointer satisfies the x86_64 ABI alignment at a C
 function entry.
 
+The shell `usertest` command creates a process, loads the embedded ELF into
+its private address space, switches CR3, enters Ring 3, reaps the zombie, and
+restores the boot address space. The original `user_run_demo` path remains in
+the kernel for the historical Ring 3 regression test but is not the shell
+process path.
+
 Transition sequence:
 
-1. Validate the embedded ELF and report malformed images to the shell.
-2. Map the user stack page and load all ELF PT_LOAD segments.
-3. Disable scheduler preemption for the duration of the synchronous demo.
+1. Create and validate a process address space and ELF image.
+2. Map the user stack page and all ELF PT_LOAD segments in that address space.
+3. Disable scheduler preemption for the synchronous run.
 4. Point TSS.RSP0 at a dedicated 16 KiB interrupt stack.
-5. Load user data selectors and execute `IRETQ` with user CS, SS, RFLAGS.IF,
+5. Switch CR3 to the process PML4.
+6. Load user data selectors and execute `IRETQ` with user CS, SS, RFLAGS.IF,
    the ELF entry point, and the user stack.
-6. `INT 0x80` enters the kernel through the DPL-3 gate. The CPU switches to
+7. `INT 0x80` enters the kernel through the DPL-3 gate. The CPU switches to
    TSS.RSP0 and the common stub builds a register frame.
-7. The syscall dispatcher validates user pointers and performs the operation.
-8. `exit` abandons the interrupt frame and restores the pre-demo kernel stack
+8. The syscall dispatcher validates user pointers using the process address
+   space and performs the operation.
+9. `exit` abandons the interrupt frame and restores the pre-demo kernel stack
    through an assembly return path.
-9. Kernel preemption and the previous TSS.RSP0 are restored.
+10. The kernel restores the previous CR3, TSS.RSP0, and preemption state and
+    marks the process zombie.
 
 Syscall ABI:
 
@@ -296,9 +391,12 @@ Syscall ABI:
 | --- | --- | --- | --- |
 | 1 | write | RDI=fd, RSI=buffer, RDX=length | bytes written or -1 |
 | 2 | exit | RDI=status | does not return |
-| 3 | getpid | none | current thread PID |
+| 3 | getpid | none | current process PID |
 | 4 | uptime | none | milliseconds since boot |
 | 5 | yield | none | 0 |
+| 6 | fork | none | child PID or -1 |
+| 7 | exec | none | replaces current image and resets user state |
+| 8 | wait | RDI=child PID, RSI=status pointer | reaped PID or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -306,15 +404,29 @@ limited to 4096 bytes per call.
 
 Important limitations:
 
-- One synchronous user program, not a general process model.
-- The user program shares the kernel's address space. Kernel pages are
-  supervisor-only, but there is no per-process isolation yet.
+- User processes are not yet scheduled concurrently. Execution is synchronous.
+- `fork` clones a ready process image but does not snapshot the caller's
+  instruction pointer.
+- `wait` does not block.
+- `exec` reloads only the built-in ELF image.
 - The loader supports only static, page-aligned `ET_EXEC` images in a fixed
   64 KiB window. There is no PIE relocation, dynamic linking, argv, envp, or
   auxiliary vector.
-- There is no process table, file-descriptor table, signals, or heap.
+- No file-descriptor table, signals, or user heap.
 - No NX, SMEP, SMAP, KASLR, or ASLR. The loader rejects W+X segments, but
   writable pages remain executable because NX is not enabled.
+
+## Display foundation
+
+`kernel/include/kernel.h` defines `framebuffer`, `display_operations`, and
+`display_device`. The framebuffer object carries physical address, dimensions,
+pitch, pixel format, channel masks, and flags. Display operations provide
+initialization, mode setting, presentation, and shutdown hooks.
+
+`kernel/drivers/display.c` implements a locked registry of up to eight display
+devices with registration, removal, name lookup, primary selection, and count.
+No VBE/GOP driver, framebuffer console, compositor, or window manager is
+implemented yet.
 
 ## Console and shell
 
@@ -332,9 +444,10 @@ translation supports US scan-code set 1, shift, caps lock, control, backspace,
 tab, enter, and arrow keys.
 
 The shell is a kernel thread. It uses the VFS directly and provides file,
-memory, scheduling, RTC, user-mode, and power commands. It does not implement
-pipes, redirection, background jobs, environment variables, or quoting beyond
-double-quoted arguments.
+memory, process, RTC, and power commands. `usertest` creates a fresh process
+and runs the embedded ELF in its private address space. The shell does not
+implement pipes, redirection, background jobs, environment variables, or
+quoting beyond double-quoted arguments.
 
 ## Power control
 
@@ -360,6 +473,10 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 8. Place the kernel after stage 2 in a zeroed 1.44 MiB image.
 9. Write sizes and SHA-256 hashes to `build/manifest.json`.
 
+The compiler include path adds `kernel/mm` and `kernel/task` for the
+address-space and process interfaces. New C files are discovered recursively
+by the build script.
+
 Compile flags include freestanding mode, no PIC/PIE, no stack protector, no
 red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
 
@@ -367,8 +484,8 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
 
 - Malformed BootInfo leads to a panic, not recovery.
 - Kernel page faults, invalid opcodes, double faults, and stack faults halt.
-- User exceptions return an error to the shell, but do not kill a process
-  because there is no process abstraction.
+- User exceptions terminate the current synchronous process with an error
+  status; the shell reaps it. There is no separate fault-recovery supervisor.
 - The VFS and heap are protected by global locks. Contention and scalability
   are not modeled.
 - There is no disk, so ramfs contents vanish on restart.
@@ -376,5 +493,5 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
   compatibility, floppy geometry support, and chipset-specific power control.
 - The kernel assumes exactly one CPU and does not program the local APIC.
 
-These boundaries are intentional for a 0.2.0 foundation and are tracked in
+These boundaries are intentional for a 0.3.0 foundation and are tracked in
 the roadmap.

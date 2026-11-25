@@ -8,6 +8,7 @@
 #include "lib.h"
 #include "pmm.h"
 #include "power.h"
+#include "process.h"
 #include "rtc.h"
 #include "string.h"
 #include "thread.h"
@@ -21,6 +22,38 @@ static u32 tests_failed = 0;
 
 static volatile u64 test_worker_counter = 0;
 static volatile u32 test_workers_done = 0;
+
+static int test_display_initialize(struct display_device *device) {
+    (void)device;
+    return 0;
+}
+
+static int test_display_set_mode(struct display_device *device, const struct framebuffer *framebuffer) {
+    (void)device;
+    (void)framebuffer;
+    return 0;
+}
+
+static int test_display_present(struct display_device *device, u32 x, u32 y, u32 width, u32 height) {
+    (void)device;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    return 0;
+}
+
+static void test_display_shutdown(struct display_device *device) {
+    (void)device;
+}
+
+static const struct display_operations test_display_operations = {
+    "test-display",
+    test_display_initialize,
+    test_display_set_mode,
+    test_display_present,
+    test_display_shutdown
+};
 
 static void check(bool condition, const char *name) {
     if (condition) {
@@ -232,6 +265,103 @@ static void test_elf(void) {
     kfree(mutated);
 }
 
+static void test_processes(void) {
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *first = process_create("process-a", 0, user_program_start, image_size);
+    struct process *second = process_create("process-b", 0, user_program_start, image_size);
+    check(first != NULL && second != NULL, "process table creates independent processes");
+    if (first == NULL || second == NULL) {
+        return;
+    }
+    check(first->pid != second->pid && first->parent_pid == 0 && second->parent_pid == 0,
+          "process pids and parents are valid");
+    check(first->space.pml4_phys != second->space.pml4_phys,
+          "processes have distinct pml4 roots");
+    u64 first_code = vmm_user_physical(&first->space, ELF_USER_BASE);
+    u64 second_code = vmm_user_physical(&second->space, ELF_USER_BASE);
+    check(first_code != 0 && second_code != 0 && first_code != second_code,
+          "same ELF maps to distinct physical frames");
+    u64 first_high = process_high_half_entry(first);
+    u64 second_high = process_high_half_entry(second);
+    check(first_high == second_high && first_high == vmm_high_pml4_entry(),
+          "kernel high-half mapping is identical across processes");
+    check(vmm_get_physical(KERNEL_HIGH_BASE + 0x100000) == 0x100000,
+          "kernel high-half alias resolves the kernel image");
+    u64 scratch_frame = pmm_alloc_frame();
+    check(scratch_frame != 0 && vmm_map_user_page(&first->space, 0x40080000, scratch_frame,
+                                                 PTE_PRESENT | PTE_WRITABLE | PTE_USER) == 0,
+          "process address space maps a user page");
+    check(vmm_user_physical(&first->space, 0x40080000) == scratch_frame,
+          "process address space reports its user frame");
+    check(vmm_user_physical(&second->space, 0x40080000) == 0,
+          "user mappings are invisible across address spaces");
+    u64 first_pid = first->pid;
+    u64 second_pid = second->pid;
+    u64 first_exit = 0;
+    u64 second_exit = 0;
+    int first_result = process_run(first_pid, &first_exit);
+    int second_result = process_run(second_pid, &second_exit);
+    check(first_result == 0 && first_exit == 0, "first process runs ELF in its own address space");
+    check(second_result == 0 && second_exit == 0, "second process runs ELF in its own address space");
+    u64 status = 0;
+    int waited = process_wait(0, first_pid, &status);
+    check(waited == (int)first_pid && status == 0, "wait reaps the first process");
+    waited = process_wait(0, second_pid, &status);
+    check(waited == (int)second_pid && status == 0, "wait reaps the second process");
+    struct process *parent = process_create("process-parent", 0, user_program_start, image_size);
+    check(parent != NULL, "process table creates a fork parent");
+    if (parent == NULL) {
+        return;
+    }
+    u64 child_pid = 0;
+    int fork_result = process_fork(parent->pid, &child_pid);
+    struct process *child = process_find(child_pid);
+    check(fork_result == PROCESS_ERROR_NONE && child != NULL && child->parent_pid == parent->pid,
+          "fork creates a child with the correct parent");
+    if (child == NULL) {
+        process_exit(parent->pid, 0);
+        process_wait(0, parent->pid, &status);
+        return;
+    }
+    check(child->space.pml4_phys != parent->space.pml4_phys && child->entry == parent->entry,
+          "fork child has an independent address space");
+    check(process_exec(child_pid, user_program_start, image_size) == PROCESS_ERROR_NONE,
+          "exec replaces a process image");
+    check(process_exit(child_pid, 0x33) == PROCESS_ERROR_NONE,
+          "process exit records a status");
+    status = 0;
+    waited = process_wait(parent->pid, child_pid, &status);
+    check(waited == (int)child_pid && status == 0x33,
+          "wait returns the child exit status");
+    process_exit(parent->pid, 0);
+    process_wait(0, parent->pid, &status);
+    check(process_count() == 0, "process table drains after reaping");
+}
+
+static void test_display(void) {
+    static struct display_device device;
+    memset(&device, 0, sizeof(device));
+    strncpy(device.name, "test-display", sizeof(device.name) - 1);
+    device.operations = &test_display_operations;
+    device.framebuffer.address = 0xFD000000ULL;
+    device.framebuffer.size = 1024 * 768 * 4;
+    device.framebuffer.width = 1024;
+    device.framebuffer.height = 768;
+    device.framebuffer.pitch = 4096;
+    device.framebuffer.bits_per_pixel = 32;
+    device.framebuffer.red_size = 8;
+    device.framebuffer.red_position = 16;
+    device.framebuffer.green_size = 8;
+    device.framebuffer.green_position = 8;
+    device.framebuffer.blue_size = 8;
+    device.framebuffer.blue_position = 0;
+    device.framebuffer.format = FRAMEBUFFER_FORMAT_RGB;
+    check(display_register(&device) == 0, "display registers a framebuffer device");
+    check(display_find("test-display") == &device, "display lookup finds the device");
+    check(display_primary() == &device && display_count() == 1, "display primary and count are valid");
+    check(display_unregister(&device) == 0 && display_count() == 0, "display unregisters cleanly");
+}
+
 void selftest_thread(void *argument) {
     (void)argument;
     kprintf("ZTEST BEGIN\n");
@@ -242,6 +372,8 @@ void selftest_thread(void *argument) {
     test_threads();
     test_elf();
     test_user_mode();
+    test_processes();
+    test_display();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");
