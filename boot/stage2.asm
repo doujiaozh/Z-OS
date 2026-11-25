@@ -174,8 +174,6 @@ protected_entry:
     mov eax, cr4
     or eax, 0x20
     mov cr4, eax
-    mov eax, 0x1000
-    mov cr3, eax
     mov ecx, 0xC0000080
     rdmsr
     or eax, 0x100
@@ -183,7 +181,9 @@ protected_entry:
     mov ecx, 0xC0000080
     rdmsr
     test eax, 0x100
-    jz paging_error
+    jz long_mode_error
+    mov eax, 0x1000
+    mov cr3, eax
     mov eax, cr0
     or eax, 0x80000001
     mov cr0, eax
@@ -192,36 +192,73 @@ protected_entry:
     jmp 0x18:long_entry
 
 validate_paging:
+    mov edi, 0x1000
+    test edi, 0x0FFF
+    jnz .table_error
+    mov edi, 0x2000
+    test edi, 0x0FFF
+    jnz .directory_pointer_error
+    mov edi, 0x3000
+    test edi, 0x0FFF
+    jnz .directory_error
     mov eax, [0x1000]
     cmp eax, 0x00002003
-    jne .invalid
+    jne .table_error
     mov eax, [0x2000]
     cmp eax, 0x00003003
-    jne .invalid
+    jne .directory_pointer_error
     mov eax, [0x3000]
     cmp eax, 0x00000083
-    jne .invalid
+    jne .directory_error
     mov eax, [0x3008]
     cmp eax, 0x00200083
-    jne .invalid
+    jne .page_error
     ret
-.invalid:
-    pop eax
+.table_error:
+    mov bl, '1'
+    jmp paging_error
+.directory_pointer_error:
+    mov bl, '2'
+    jmp paging_error
+.directory_error:
+    mov bl, '3'
+    jmp paging_error
+.page_error:
+    mov bl, '4'
     jmp paging_error
 
+long_mode_error:
+    mov bl, '5'
+    mov esi, long_mode_error_text
+    mov ecx, long_mode_error_text_length
+    jmp report_error
+
 paging_error:
-    mov edi, 0xB8000
     mov esi, paging_error_text
     mov ecx, paging_error_text_length
+report_error:
+    mov edi, 0xB8000
     mov ah, 0x4F
-.copy:
+.copy_text:
     lodsb
     stosw
-    loop .copy
+    loop .copy_text
+    mov al, bl
+    stosw
+    add edi, 2
+    mov al, 'H'
+    stosw
+    mov al, 'A'
+    stosw
+    mov al, 'L'
+    stosw
+    mov al, 'T'
+    stosw
 .halt:
     cli
     hlt
     jmp .halt
+
 
 BITS 64
 long_entry:
@@ -246,8 +283,10 @@ retries db 0
 sector_index dw 0
 e820_count db 0
 disk_message db "Z-OS stage2 disk error", 13, 10, 0
-paging_error_text db "Z-OS STAGE2 PAGING ERROR"
+paging_error_text db "Z-OS STAGE2 PAGING ERROR "
 paging_error_text_length equ $ - paging_error_text
+long_mode_error_text db "Z-OS STAGE2 LONG MODE ERROR "
+long_mode_error_text_length equ $ - long_mode_error_text
 
 align 8
 gdt_start:

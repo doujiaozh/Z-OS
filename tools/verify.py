@@ -2,6 +2,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -339,6 +340,55 @@ def run_shell():
                 process.wait()
 
 
+def monitor_read_vga_text(monitor_port, start_address, length):
+    connection = None
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        try:
+            connection = socket.create_connection(("127.0.0.1", monitor_port), timeout=0.5)
+            break
+        except OSError:
+            time.sleep(0.2)
+    if connection is None:
+        raise CheckFailure("could not connect to the QEMU monitor")
+    connection.settimeout(0.2)
+    try:
+        time.sleep(0.2)
+        try:
+            connection.recv(65536)
+        except OSError:
+            pass
+        connection.sendall(("xp /%dxb %s\n" % (length, start_address)).encode())
+        buffer = bytearray()
+        end = time.time() + 4
+        while time.time() < end:
+            try:
+                chunk = connection.recv(65536)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                if b"(qemu)" in buffer:
+                    break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+    finally:
+        try:
+            connection.close()
+        except OSError:
+            pass
+    dump = bytes(buffer).decode("utf-8", errors="replace")
+    raw = bytearray()
+    for line in dump.splitlines():
+        match = re.match(r"^[0-9a-fA-F]{8,}:\s+(.*)$", line)
+        if not match:
+            continue
+        for token in re.findall(r"0x([0-9a-fA-F]{2})", match.group(1)):
+            raw.append(int(token, 16))
+    return "".join(chr(raw[index]) for index in range(0, len(raw), 2))
+
+
 def run_bootcheck():
     print("== boot fault check ==")
     qemu = find_qemu()
@@ -356,24 +406,27 @@ def run_bootcheck():
     print("image integrity PASS")
 
     targets = [
-        ("z-os.img", ["Z-OS", "Boot complete. Starting shell.", "z-os:"], 25),
-        ("z-os-test.img", ["Z-OS", "ZTEST BEGIN"], 40),
+        ("z-os.img", ["Z-OS", "Boot complete. Starting shell.", "z-os:"], 25, True),
+        ("z-os-test.img", ["Z-OS", "ZTEST BEGIN"], 40, False),
     ]
-    for image_name, markers, deadline_seconds in targets:
+    for image_name, markers, deadline_seconds, expect_prompt in targets:
         serial_path = BUILD / (image_name.replace(".", "_") + ".serial.log")
         trace_path = BUILD / (image_name.replace(".", "_") + ".trace.log")
         for path in (serial_path, trace_path):
             if path.exists():
                 path.unlink()
+        monitor_port = free_port()
         command = [qemu] + base_drive(image_name) + [
             "-display", "none",
             "-serial", "file:" + str(serial_path),
+            "-monitor", "tcp:127.0.0.1:" + str(monitor_port) + ",server=on,wait=off",
             "-d", "int,cpu_reset,guest_errors",
             "-D", str(trace_path),
         ]
         process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         deadline = time.time() + deadline_seconds
         log = ""
+        reached = False
         try:
             while time.time() < deadline:
                 if process.poll() is not None:
@@ -381,8 +434,31 @@ def run_bootcheck():
                 if serial_path.exists():
                     log = serial_path.read_text(encoding="utf-8", errors="replace")
                     if all(marker in log for marker in markers):
+                        reached = True
                         break
                 time.sleep(0.2)
+            if serial_path.exists():
+                log = serial_path.read_text(encoding="utf-8", errors="replace")
+            trace = trace_path.read_text(encoding="utf-8", errors="replace") if trace_path.exists() else ""
+            triple_faults = trace.count("Triple fault")
+            if triple_faults != 0:
+                raise CheckFailure(image_name + " reported " + str(triple_faults) + " triple faults")
+            page_faults = trace.count("v=0e")
+            if page_faults != 0:
+                raise CheckFailure(image_name + " reported " + str(page_faults) + " page fault exceptions during boot")
+            for marker in markers:
+                if marker not in log:
+                    raise CheckFailure(image_name + " missing boot marker: " + marker + "\n" + log)
+            vga_text = monitor_read_vga_text(monitor_port, "0xb8000", 4000)
+            for forbidden in ("PAGING ERROR", "LONG MODE ERROR"):
+                if forbidden in vga_text:
+                    raise CheckFailure(image_name + " vga screen shows loader error: " + forbidden)
+            if expect_prompt:
+                if "Z-OS" not in vga_text:
+                    raise CheckFailure(image_name + " vga screen does not show the kernel banner")
+                if "z-os" not in vga_text:
+                    raise CheckFailure(image_name + " vga screen does not show the shell prompt")
+            print(image_name + " boot trace clean, serial and vga markers found")
         finally:
             if process.poll() is None:
                 process.terminate()
@@ -391,19 +467,6 @@ def run_bootcheck():
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        if serial_path.exists():
-            log = serial_path.read_text(encoding="utf-8", errors="replace")
-        trace = trace_path.read_text(encoding="utf-8", errors="replace") if trace_path.exists() else ""
-        triple_faults = trace.count("Triple fault")
-        if triple_faults != 0:
-            raise CheckFailure(image_name + " reported " + str(triple_faults) + " triple faults")
-        page_faults = trace.count("v=0e")
-        if page_faults != 0:
-            raise CheckFailure(image_name + " reported " + str(page_faults) + " page fault exceptions during boot")
-        for marker in markers:
-            if marker not in log:
-                raise CheckFailure(image_name + " missing boot marker: " + marker + "\n" + log)
-        print(image_name + " boot trace clean, markers found")
     print("boot fault check PASS")
 
 

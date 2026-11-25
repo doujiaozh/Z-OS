@@ -180,7 +180,9 @@ harness can validate a machine-readable result rather than a screenshot.
 
 The boot fault check re-verifies the image stage digests against the build
 manifest, boots both images with QEMU interrupt tracing, and fails on any
-triple fault or page-fault exception before the shell prompt. The keyboard
+triple fault, page-fault exception, or VGA loader error text. It also decodes
+the VGA text buffer to confirm the kernel banner and shell prompt are actually
+on screen. The keyboard
 check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a

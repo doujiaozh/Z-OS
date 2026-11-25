@@ -155,6 +155,11 @@ The boot fault check verifies image integrity and early boot robustness:
 - The self-test image must print the banner and `ZTEST BEGIN`.
 - The trace must contain zero `Triple fault` records and zero page-fault
   exceptions (`v=0e`).
+- The VGA text buffer is read through the QEMU monitor command `xp` and decoded
+  into screen text. The normal image must show the kernel banner and the shell
+  prompt on screen, and neither image may show `PAGING ERROR` or
+  `LONG MODE ERROR`, so a loader diagnostic cannot hide behind a serial-only
+  check.
 
 This stage exists because an early paging or loader failure otherwise shows up
 only as a reset loop. It is part of the `all` stage and can be run alone with

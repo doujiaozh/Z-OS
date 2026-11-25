@@ -74,15 +74,30 @@ Stage 2 occupies exactly 32 sectors, from LBA 1 through LBA 32.
 5. It copies the staging area to 0x100000.
 6. It builds identity page tables for the first 1 GiB with 2 MiB pages:
    PML4 at 0x1000, PDPT at 0x2000, PD at 0x3000.
-7. It validates the four page-table entries it just wrote before enabling
-   paging: PML4[0] must equal 0x2003, PDPT[0] 0x3003, PD[0] 0x83, and PD[1]
-   0x200083. A mismatch writes a visible `Z-OS STAGE2 PAGING ERROR` message to
-   the VGA text buffer and halts instead of triple faulting.
-8. It enables PAE and loads CR3, then sets EFER.LME and reads EFER back to
-   confirm the long-mode enable bit actually took effect.
-9. It enables paging, reloads CR3 to invalidate stale TLB entries, and far
-   jumps to the 64-bit code descriptor.
-10. It places the BootInfo pointer in RDI and jumps to 0x100000.
+7. It validates the page tables before enabling paging. Each table base must
+   be 4096-byte aligned, and the four entries written earlier must match the
+   expected values exactly: PML4[0] 0x2003, PDPT[0] 0x3003, PD[0] 0x83, and
+   PD[1] 0x200083. A failure writes a red VGA message with a diagnostic code
+   and halts instead of triple faulting.
+8. It enters long mode in the canonical order: enable CR4.PAE, set EFER.LME,
+   read EFER back to confirm the enable bit took effect, load CR3 with the
+   PML4 frame, set CR0.PG, then perform the far jump to the 64-bit code
+   descriptor. CR3 is reloaded once after paging is enabled to discard stale
+   TLB entries.
+9. It places the BootInfo pointer in RDI and jumps to 0x100000.
+
+Loader diagnostic codes shown on the VGA screen:
+
+| Message | Meaning |
+| --- | --- |
+| `Z-OS STAGE2 PAGING ERROR 1` | PML4 base misaligned or PML4[0] wrong |
+| `Z-OS STAGE2 PAGING ERROR 2` | PDPT base misaligned or PDPT[0] wrong |
+| `Z-OS STAGE2 PAGING ERROR 3` | Page directory base misaligned or PD[0] wrong |
+| `Z-OS STAGE2 PAGING ERROR 4` | PD[1] wrong, identity map incomplete |
+| `Z-OS STAGE2 LONG MODE ERROR 5` | EFER.LME did not take effect |
+
+Each message ends with `HALT` and the CPU stops with interrupts disabled, so
+the failure is visible on screen instead of producing a reset loop.
 
 Every loader failure path reports to the VGA text buffer, so an early paging
 breakdown produces a readable message rather than a reset loop. The kernel
@@ -671,9 +686,10 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
 
 - Malformed BootInfo leads to a panic, not recovery.
 - Stage 2 validates its page tables and EFER state before enabling paging and
-  reports failures to the VGA text buffer; the automated boot fault check also
-  verifies that both images boot with no triple faults and no page-fault
-  exceptions.
+  reports coded failures to the VGA text buffer; the automated boot fault
+  check verifies image digests, absence of triple faults and page-fault
+  exceptions, and reads the VGA text buffer through the QEMU monitor to confirm
+  the screen shows the kernel banner and shell prompt and never a loader error.
 - Kernel page faults, invalid opcodes, double faults, and stack faults halt.
 - User exceptions terminate the current process with an error status; the
   batch driver reports it and the caller reaps the zombie. There is no
