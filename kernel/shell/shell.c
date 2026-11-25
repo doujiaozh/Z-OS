@@ -1,5 +1,8 @@
 #include "shell.h"
+#include "ata.h"
 #include "console.h"
+#include "desktop.h"
+#include "syscall.h"
 #include "fb.h"
 #include "font.h"
 #include "gfx.h"
@@ -19,6 +22,7 @@
 #include "user.h"
 #include "vfs.h"
 #include "wm.h"
+#include "zfs.h"
 
 #define SHELL_LINE_MAX 256
 #define SHELL_ARG_MAX 16
@@ -213,6 +217,16 @@ static void command_help(void) {
     kprintf("  postest              run the posix fd, signal and wait test program\n");
     kprintf("  guitest2             run the font, mouse and compositor test program\n");
     kprintf("  gfx [demo|test|off]  framebuffer, gfx and window manager control\n");
+    kprintf("  diskinfo             ata block device and zfs status\n");
+    kprintf("  format               format the ata disk with zfs\n");
+    kprintf("  zmount               mount zfs and populate /disk\n");
+    kprintf("  zls                  list zfs files on disk\n");
+    kprintf("  zsave <name> <text>  write a file to zfs\n");
+    kprintf("  zcat <name>          read a file from zfs\n");
+    kprintf("  zrm <name>           remove a file from zfs\n");
+    kprintf("  zsync                write /disk contents back to zfs\n");
+    kprintf("  gui                  enter the graphical desktop session\n");
+    kprintf("  exit                 leave the graphical desktop session\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -703,6 +717,169 @@ static void command_schedtest(void) {
             pids[0], first_status, pids[1], second_status, result);
 }
 
+static void gui_print_action(char *previous) {
+    const char *action = desktop_last_action();
+    if (action[0] != 0 && strcmp(previous, action) != 0) {
+        kprintf("gui: %s\n", action);
+        strncpy(previous, action, 47);
+        previous[47] = 0;
+    }
+}
+
+static void gui_run_session(void) {
+    if (fb_set_mode(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT, FB_DEFAULT_BPP) != 0) {
+        kprintf("gui: framebuffer mode set failed\n");
+        return;
+    }
+    struct gfx_surface *surface = fb_surface();
+    if (surface == NULL) {
+        kprintf("gui: no graphics surface\n");
+        fb_restore_text();
+        console_clear();
+        return;
+    }
+    mouse_set_bounds(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT);
+    mouse_set_gui_mode(true);
+    desktop_init(surface);
+    desktop_render();
+    mouse_render(surface);
+    kprintf("gui: desktop active\n");
+    char previous[48];
+    previous[0] = 0;
+    while (!desktop_should_exit()) {
+        struct mouse_event event;
+        while (mouse_pop_event(&event)) {
+            desktop_handle_mouse(&event);
+            desktop_render();
+            mouse_render(surface);
+            gui_print_action(previous);
+        }
+        int key = input_trygetchar();
+        while (key >= 0) {
+            desktop_handle_key((char)key);
+            desktop_render();
+            mouse_render(surface);
+            gui_print_action(previous);
+            key = input_trygetchar();
+        }
+        sched_sleep_ms(15);
+    }
+    mouse_restore(surface);
+    mouse_set_gui_mode(false);
+    fb_restore_text();
+    console_clear();
+    kprintf("gui: exited desktop\n");
+}
+
+static void command_gui(void) {
+    gui_run_session();
+}
+
+static void command_exit(void) {
+    kprintf("exit: shell session is the base console\n");
+    kprintf("exit: type exit inside the desktop to leave it\n");
+}
+
+static void command_diskinfo(void) {
+    kprintf("ata present: %s\n", ata_present() ? "yes" : "no");
+    if (ata_present()) {
+        kprintf("ata model: %s\n", ata_model());
+        kprintf("ata sectors: %u (%u KiB)\n", ata_sector_count(), ata_sector_count() / 2);
+    }
+    kprintf("zfs mounted: %s, files: %u\n", zfs_mounted() ? "yes" : "no", zfs_file_count());
+    struct vfs_node *disk = vfs_lookup(vfs_root(), "/disk");
+    kprintf("vfs /disk: %s\n", disk != NULL ? "present" : "absent");
+}
+
+static void command_format(void) {
+    int result = zfs_format();
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("format: failed (%d)\n", result);
+        return;
+    }
+    kprintf("format: zfs formatted %u sectors\n", ata_sector_count());
+}
+
+static void command_zmount(void) {
+    int result = zfs_mount();
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("zmount: mount failed (%d), run format first\n", result);
+        return;
+    }
+    result = zfs_mount_vfs();
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("zmount: vfs attach failed (%d)\n", result);
+        return;
+    }
+    kprintf("zmount: %u files attached under /disk\n", zfs_file_count());
+}
+
+static void command_zls(void) {
+    struct zfs_dirent entries[ZFS_MAX_FILES];
+    u32 count = zfs_list(entries, ZFS_MAX_FILES);
+    kprintf("zfs files: %u\n", count);
+    for (u32 index = 0; index < count; index++) {
+        kprintf("- %8u  %s\n", entries[index].size, entries[index].name);
+    }
+}
+
+static void command_zsave(int argc, char *arguments[]) {
+    if (argc < 3) {
+        kprintf("usage: zsave <name> <text>\n");
+        return;
+    }
+    char text[512];
+    join_arguments(argc, arguments, 2, text, sizeof(text), true);
+    int result = zfs_write_file(arguments[1], text, (u32)strlen(text));
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("zsave: failed (%d)\n", result);
+        return;
+    }
+    kprintf("zsave: wrote %u bytes to %s\n", (u32)strlen(text), arguments[1]);
+}
+
+static void command_zcat(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: zcat <name>\n");
+        return;
+    }
+    u8 *buffer = kmalloc(ZFS_MAX_FILE_SIZE);
+    if (buffer == NULL) {
+        kprintf("zcat: out of memory\n");
+        return;
+    }
+    int read = zfs_read_file(arguments[1], buffer, ZFS_MAX_FILE_SIZE);
+    if (read < 0) {
+        kprintf("zcat: read failed (%d)\n", read);
+        kfree(buffer);
+        return;
+    }
+    console_write_n((const char *)buffer, (usize)read);
+    kfree(buffer);
+}
+
+static void command_zrm(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: zrm <name>\n");
+        return;
+    }
+    int result = zfs_remove_file(arguments[1]);
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("zrm: failed (%d)\n", result);
+        return;
+    }
+    kprintf("zrm: removed %s\n", arguments[1]);
+}
+
+static void command_zsync(void) {
+    int result = zfs_sync_vfs();
+    if (result != ZFS_ERROR_NONE) {
+        kprintf("zsync: failed (%d)\n", result);
+        return;
+    }
+    kprintf("zsync: /disk written to zfs, %u files\n", zfs_file_count());
+}
+
 static void command_postest(void) {
     u64 status = 0xFFFFFFFFFFFFFFFFULL;
     u64 pid = run_single_program("postest", user_postest_start, user_postest_end, &status);
@@ -900,6 +1077,26 @@ static void execute_command(int argc, char *arguments[]) {
         command_guitest2();
     } else if (strcmp(command, "gfx") == 0) {
         command_gfx(argc, arguments);
+    } else if (strcmp(command, "diskinfo") == 0) {
+        command_diskinfo();
+    } else if (strcmp(command, "format") == 0) {
+        command_format();
+    } else if (strcmp(command, "zmount") == 0) {
+        command_zmount();
+    } else if (strcmp(command, "zls") == 0) {
+        command_zls();
+    } else if (strcmp(command, "zsave") == 0) {
+        command_zsave(argc, arguments);
+    } else if (strcmp(command, "zcat") == 0) {
+        command_zcat(argc, arguments);
+    } else if (strcmp(command, "zrm") == 0) {
+        command_zrm(argc, arguments);
+    } else if (strcmp(command, "zsync") == 0) {
+        command_zsync();
+    } else if (strcmp(command, "gui") == 0) {
+        command_gui();
+    } else if (strcmp(command, "exit") == 0) {
+        command_exit();
     } else if (strcmp(command, "reboot") == 0) {
         system_reboot();
     } else if (strcmp(command, "shutdown") == 0 || strcmp(command, "poweroff") == 0) {
@@ -926,5 +1123,13 @@ void shell_thread(void *argument) {
             continue;
         }
         execute_command(count, arguments);
+        if (gui_enter_requested()) {
+            gui_clear_requests();
+            gui_run_session();
+        }
+        if (gui_exit_requested()) {
+            gui_clear_requests();
+            kprintf("exit: no desktop session active\n");
+        }
     }
 }

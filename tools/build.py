@@ -38,6 +38,7 @@ CFLAGS = [
     "-Ikernel/task",
     "-Ikernel/gui",
     "-Ikernel/fs",
+    "-Ikernel/drivers",
 ]
 USER_CFLAGS = [
     "--target=x86_64-none-elf",

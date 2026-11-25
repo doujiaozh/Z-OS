@@ -9,13 +9,15 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.5.0 is the POSIX stage. It boots, manages memory, runs preemptive
-kernel threads, hosts a VFS and shell, schedules Ring 3 ELF64 processes
-preemptively with private PML4 address spaces and kernel stacks, implements
-file descriptor tables, POSIX credentials, signals with user handlers and
-sigreturn, timed waits with EAGAIN and EINTR, and extends the graphics stack
-with a bitmap font, PS/2 mouse cursor, and a compositor abstraction. It
-verifies itself under QEMU with 194 in-kernel checks.
+Z-OS 0.6.0 is the Storage and Desktop stage. It boots, manages memory, runs
+preemptive kernel threads, hosts a VFS, ATA storage and shell, schedules Ring 3
+ELF64 processes, implements POSIX primitives, and adds an ATA PIO block driver
+with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
+provides mouse events, a text-mode pointer, window frames with dragging and
+close buttons, and a modern desktop with status bar, taskbar, icons and hit
+tested interaction, plus a GUI session that returns to a fully restored VGA
+text console. It verifies itself under QEMU with 253 in-kernel checks plus
+cross-reboot storage replay and framebuffer desktop tests.
 
 ## Phase 1 execution status
 
@@ -34,7 +36,10 @@ verifies itself under QEMU with 194 in-kernel checks.
 | Signals with user handlers, sigreturn, and blocked masks | Implemented and verified | v0.5.0-posix |
 | Blocking wait queue with timeout, EAGAIN, and EINTR | Implemented and verified | v0.5.0-posix |
 | Bitmap font, PS/2 mouse cursor, compositor abstraction | Implemented and verified | v0.5.0-posix |
-| Persistent block device and on-disk filesystem | Planned, next | v0.6.0-storage |
+| Persistent block device and on-disk filesystem | Implemented and verified | v0.6.0-storage |
+| Modern desktop shell with mouse events and hit testing | Implemented and verified | v0.6.0-storage |
+| Graphical session switching back to VGA text mode | Implemented and verified | v0.6.0-storage |
+| Network stack, TCP/IP, and a socket API | Planned, next | v0.7.0-network |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -44,7 +49,7 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.5.0 POSIX | Needed for general purpose |
+| Domain | 0.6.0 Desktop | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
@@ -54,13 +59,13 @@ claimed as complete.
 | VFS | Ramfs, 128 nodes, global lock | Mounts, dcache, inode cache, page cache, permissions, quotas |
 | Storage | None | ATA, NVMe, virtio-blk, partitioning, journaling FS, fsck |
 | Networking | None | PCI NIC drivers, ARP, IPv4/IPv6, UDP/TCP, sockets, DNS, TLS |
-| Graphics | PCI framebuffer, gfx surfaces, window composer, 8x16 font, mouse cursor, compositor | Damage tracking, event queue, GPU drivers, acceleration |
+| Graphics | PCI framebuffer, gfx surfaces, fonts, mouse events, compositor, desktop shell, hit testing | Damage tracking, GPU drivers, acceleration, user-space clients |
 | Security | Ring 3, per-process user pages | NX, SMEP, SMAP, W^X, KASLR, ASLR, capabilities, MAC, audit |
 | Power | QEMU-compatible ACPI power request | ACPI parser, S3/S4, thermal, battery, cpufreq, idle governors |
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
-| ABI | Twenty-four custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
+| ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 194 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 253 boot tests, storage replay and desktop checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -94,13 +99,14 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v0.5.0-posix delivered file descriptor tables with fork inheritance, POSIX
-credentials with permission checks, signal delivery with user handlers and
-sigreturn, blocked masks, a blocking wait queue with deadline expiry and EINTR
-interrupts, a deterministic 8x16 bitmap font, a PS/2 mouse driver with cursor
-save and restore, and a compositor abstraction with layers, damage, and flush
-callbacks. The remaining items below move the process model toward a complete
-POSIX ABI and the graphics stack toward a usable desktop.
+v0.6.0-storage delivered the ATA PIO block driver, the persistent Z-OS
+filesystem with format, mount, file operations and a /disk VFS mount, the
+system-wide mouse event queue, the text-mode pointer overlay, window titles,
+close buttons, dragging and z-order composition, the desktop shell with status
+bar, taskbar, icons and hit testing, GUI session switching with a restored VGA
+text console, and the gui_enter and gui_exit syscalls. The remaining items
+below move storage toward a real disk filesystem, the desktop toward a
+user-space compositor, and the system toward networking.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -303,17 +309,13 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add sessions, process groups, job control, signals for process groups, and
-   POSIX error numbering across every syscall.
-2. Add a user heap, argv/envp, static PIE relocation, and a libc.
-3. Extend the graphics stack with a framebuffer console, mouse event queue,
-   damage tracking, and a user-space compositor client.
-4. Unify kernel threads and user processes into one task model with a single
-   scheduler.
-5. Complete the hardening backlog: guard pages, VFS reference counts and
-   ownership, stack traces, SMEP/SMAP, and NX.
-6. Add ACPI table parsing, PCI enumeration, and a persistent disk driver.
-7. Build the first user-space init and libc.
+1. Add a TCP/IP network stack with an e1000 driver and a socket API.
+2. Replace polled PIO with DMA, add partitions, journaling and checksums.
+3. Move the desktop to a user-space compositor client with damage tracking.
+4. Add sessions, process groups, job control and a complete POSIX ABI with libc.
+5. Unify kernel threads and user processes into one task model.
+6. Complete the hardening backlog: guard pages, VFS ownership, SMEP/SMAP, NX.
+7. Add ACPI table parsing and PCI enumeration.
 
 Progress should be measured by verified tests and external use cases, not by
 the number of named features.

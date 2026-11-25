@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.5.0 POSIX |
+| Version | 0.6.0 Desktop |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -45,11 +45,12 @@ The build produces:
 - `build/z-os-test.img`
 - `build/z-os.elf`
 - `build/user_init.elf`, `build/user_multi.elf`, `build/user_forktest.elf`,
-  `build/user_guitest.elf`, `build/user_postest.elf`, `build/user_guitest2.elf`
+  `build/user_guitest.elf`, `build/user_postest.elf`, `build/user_guitest2.elf`,
+  `build/z-os-testdisk.img`, `build/z-os-storage.img`
 - `build/manifest.json`
 
-The loader enforces a 320 KiB kernel slot. The 0.5.0 kernel occupies
-approximately 159 KiB of the slot, leaving room for additional subsystems. The
+The loader enforces a 320 KiB kernel slot. The 0.6.0 kernel occupies
+approximately 183 KiB of the slot, leaving room for additional subsystems. The
 image is zero-padded to 1,474,560 bytes. SHA-256 hashes for stage 1, stage 2,
 the flat kernel, both images, and all six user ELF programs are written to
 `build/manifest.json` after every build. The boot fault check cross-checks the
@@ -57,22 +58,24 @@ image layout against those digests.
 
 ## Self-test result
 
-The self-test image executes 194 checks and exits QEMU through the ISA debug
+The self-test image executes 253 checks and exits QEMU through the ISA debug
 exit device. A successful run returns host exit status 33, which is
 `(0x10 << 1) | 1`. A failure returns 35.
 
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=194 failed=0
+ZTEST SUMMARY passed=253 failed=0
 ZTEST RESULT PASS
 ```
 
-The original 107 checks remain in place. This milestone adds 87 checks
-covering descriptor tables and fork inheritance, credential permission
-matrices, signal state and frame delivery, wait queue expiry and wakeup, font
-glyph rendering, PS/2 mouse packet decoding and cursor save/restore, compositor
-layers and damage, plus two additional user programs.
+The original 194 checks remain in place. This milestone adds 59 checks
+covering ATA identification and sector round trips, ZFS format, mount, file
+write, read, metadata reload, VFS attach and removal, mouse event queue
+semantics, the text-mode pointer overlay, window frames, close buttons, title
+hit testing and z-order, desktop rendering, icon clicks, dragging, close
+buttons, taskbar exit, and framebuffer desktop rendering with text-mode
+restoration.
 
 Test coverage by area:
 
@@ -102,12 +105,18 @@ Test coverage by area:
 | Wait queue | Empty state, blocked registration, infinite deadline, child-exit wake, timed expiry, removal |
 | Font | Blank space glyph, glyph pixels, multi-row bitmap, text width, deterministic rendering, placement difference |
 | Mouse | Driver initialization, relative movement decode, button decode, cursor render, background restore, bounds clamp |
+| Storage | ATA presence, sector count, sector write and readback, restore, ZFS format, mount, write, read, list, metadata reload, VFS attach, content match, remove |
+| Mouse events | Queue start state, move payload, button payload, drain order, fifo order, hardware packet generation |
+| Text pointer | Overlay drawn, position tracking, overlay glyph, restore, graphics-mode suppression |
+| Window frames | Frame composition, title bar pixels, close button pixels, close hit test, title hit separation, window under point, raise z-order, reaping |
+| Desktop | Status bar, taskbar, wallpaper, icon hit test, icon click opens window, drag start, drag motion, drag release, close button, taskbar exit |
+| GUI mode | Framebuffer mode set, surface access, status bar, taskbar, wallpaper pixels, graphics mouse mode, text mode restore |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
 | User mode | Ring-3 C program under the process scheduler, syscall write, syscall exit, reaping |
 
-The POSIX and extended graphics tests produce the following serial output:
+The storage and desktop tests produce the following serial output:
 
 ```text
 multi: process started
@@ -121,6 +130,16 @@ guitest2: extended graphics test started
 guitest2: font text rendered
 guitest2: mouse state reported
 guitest2: compositor surface verified
+ata present: yes
+ata model: QEMU HARDDISK
+format: zfs formatted 8192 sectors
+zmount: 0 files attached under /disk
+zsync: /disk written to zfs, 1 files
+zfs files: 1
+-       17  persist.txt
+gui: desktop active
+gui: opened Files
+gui: exited desktop
 ```
 
 The preemption test additionally verifies that the marker trace records both
@@ -217,6 +236,10 @@ the shell over COM1. The following commands and properties are checked:
   exit status.
 - `gfx test` enters graphics mode, composes two windows, verifies framebuffer
   pixels, font output, and the cursor, then restores text mode.
+- `diskinfo`, `format`, `zmount`, `zls`, `zcat` and `zsync` exercise ATA and
+  ZFS through the shell.
+- `gui` enters the desktop session and `exit` typed inside the desktop returns
+  to the shell with the VGA text console restored.
 - `postest` runs the POSIX descriptor, credential, signal, and timed wait
   program and reports its exit status.
 - `guitest2` renders font text into the framebuffer, queries the mouse, and
@@ -279,7 +302,10 @@ rebuilds first unless `--skip-build` is supplied.
 - POSIX signals, credentials, sessions, or a file-descriptor table.
 - Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
-- Mouse event queues, damage-driven redraw, or a user-space compositor client.
+- Mouse hardware injection; the automated desktop assertions drive the same
+  event queue and hit-testing path that IRQ12 feeds, and the QEMU monitor mouse
+  commands were observed to be inert in headless mode on this host.
+- Damage-driven redraw, a user-space compositor client, or window resize.
 - POSIX ABI conformance, libc, argv/envp, or dynamic linking.
 - The kernel executing from the high-half direct map. The high-half window is
   mapped and tested, while kernel text still executes through the low identity
@@ -292,4 +318,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.5.0 test run.
+passing 0.6.0 test run.

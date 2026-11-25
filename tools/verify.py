@@ -55,20 +55,38 @@ def check_log(log, markers, forbidden):
             raise CheckFailure("forbidden marker: " + marker)
 
 
+def prepare_disk(name, size):
+    path = BUILD / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    remaining = size
+    with open(path, "wb") as handle:
+        chunk = bytes(1024 * 1024)
+        while remaining > 0:
+            write_size = min(remaining, len(chunk))
+            handle.write(chunk[:write_size])
+            remaining -= write_size
+    return path
+
+
+def disk_drive(name):
+    return ["-drive", "format=raw,file=" + str(BUILD / name) + ",if=ide,index=0"]
+
+
 def run_selftest():
     print("== kernel self-test ==")
     qemu = find_qemu()
+    prepare_disk("z-os-testdisk.img", 4 * 1024 * 1024)
     log_path = BUILD / "selftest.log"
     if log_path.exists():
         log_path.unlink()
-    command = [qemu] + base_drive("z-os-test.img") + [
+    command = [qemu] + base_drive("z-os-test.img") + disk_drive("z-os-testdisk.img") + [
         "-display", "none",
         "-serial", "file:" + str(log_path),
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     ]
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
     try:
-        exit_code = process.wait(timeout=40)
+        exit_code = process.wait(timeout=150)
     except subprocess.TimeoutExpired:
         process.kill()
         process.wait()
@@ -77,7 +95,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=194 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=253 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -305,6 +323,7 @@ def run_shell():
                           "guitest2: mouse state reported", "guitest2: compositor surface verified",
                           "font pixels"]),
             ("cat /README", ["Z-OS is a small 64-bit operating system."]),
+            ("diskinfo", ["ata present: no", "zfs mounted: no"]),
         ]
         for command_line, expected in tests:
             start = len(session.snapshot())
@@ -472,9 +491,247 @@ def run_bootcheck():
     print("boot fault check PASS")
 
 
+class MonitorSession:
+    def __init__(self, port):
+        self.connection = None
+        deadline = time.time() + 8
+        while time.time() < deadline:
+            try:
+                self.connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                break
+            except OSError:
+                time.sleep(0.2)
+        if self.connection is None:
+            raise CheckFailure("could not connect to the QEMU monitor")
+        self.connection.settimeout(0.2)
+        time.sleep(0.2)
+        try:
+            self.connection.recv(65536)
+        except OSError:
+            pass
+
+    def command(self, text, timeout=4):
+        self.connection.sendall((text + "\n").encode())
+        buffer = bytearray()
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                chunk = self.connection.recv(65536)
+                if not chunk:
+                    break
+                buffer.extend(chunk)
+                if b"(qemu)" in buffer:
+                    break
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+        return bytes(buffer).decode("utf-8", errors="replace")
+
+    def sendkey(self, key):
+        self.command("sendkey " + key)
+
+    def screendump(self, path):
+        target = os.path.abspath(str(path)).replace("\\", "/")
+        self.command("screendump " + target, timeout=6)
+        if not path.exists():
+            raise CheckFailure("QEMU screendump did not produce " + str(path))
+
+    def vga_text(self):
+        dump = self.command("xp /4000xb 0xb8000")
+        raw = bytearray()
+        for line in dump.splitlines():
+            match = re.match(r"^[0-9a-fA-F]{8,}:\s+(.*)$", line)
+            if not match:
+                continue
+            for token in re.findall(r"0x([0-9a-fA-F]{2})", match.group(1)):
+                raw.append(int(token, 16))
+        return "".join(chr(raw[index]) for index in range(0, len(raw), 2))
+
+    def close(self):
+        try:
+            self.connection.close()
+        except OSError:
+            pass
+
+
+def attach_monitor(host_port):
+    return MonitorSession(host_port)
+
+
+def run_storage():
+    print("== storage persistence test ==")
+    qemu = find_qemu()
+    prepare_disk("z-os-storage.img", 4 * 1024 * 1024)
+    first_commands = [
+        ("diskinfo", ["ata present: yes", "ata model: QEMU HARDDISK"]),
+        ("format", ["format: zfs formatted"]),
+        ("zmount", ["zmount: 0 files attached under /disk"]),
+        ("write /disk/persist.txt persistent-disk-data", []),
+        ("zsync", ["zsync: /disk written to zfs"]),
+        ("zls", ["persist.txt", "zfs files: 1"]),
+        ("cat /disk/persist.txt", ["persistent-disk-data"]),
+    ]
+    second_commands = [
+        ("zmount", ["zmount: 1 files attached under /disk"]),
+        ("zls", ["persist.txt", "zfs files: 1"]),
+        ("cat /disk/persist.txt", ["persistent-disk-data"]),
+    ]
+
+    def boot_with_commands(commands, label):
+        port = free_port()
+        command = [qemu] + base_drive("z-os.img") + disk_drive("z-os-storage.img") + [
+            "-display", "none",
+            "-serial", "tcp:127.0.0.1:" + str(port) + ",server=on,wait=off",
+        ]
+        process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        connection = None
+        session = None
+        try:
+            deadline = time.time() + 10
+            while time.time() < deadline:
+                if process.poll() is not None:
+                    raise CheckFailure(label + " QEMU exited early")
+                try:
+                    connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                    break
+                except OSError:
+                    time.sleep(0.2)
+            if connection is None:
+                raise CheckFailure("could not connect to the serial port for " + label)
+            session = SerialSession(connection)
+            session.send_line("")
+            session.wait_for("z-os:", 20)
+            for command_line, expected in commands:
+                start = len(session.snapshot())
+                session.send_line(command_line)
+                prompt = session.wait_for("z-os:", 20, start + len(command_line) + 1)
+                segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
+                for marker in expected:
+                    if marker not in segment:
+                        raise CheckFailure(label + " command '" + command_line +
+                                           "' missing marker: " + marker + "\n" + segment)
+            session.send_line("shutdown")
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                raise CheckFailure(label + " did not power off")
+        finally:
+            if session is not None:
+                session.close()
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+
+    boot_with_commands(first_commands, "storage-first-boot")
+    print("first boot wrote and flushed persistent data")
+    boot_with_commands(second_commands, "storage-second-boot")
+    print("second boot recovered the data from disk")
+    print("storage persistence PASS")
+
+
+def run_gui():
+    print("== gui desktop test ==")
+    from PIL import Image
+
+    qemu = find_qemu()
+    port = free_port()
+    monitor_port = free_port()
+    command = [qemu] + base_drive("z-os.img") + [
+        "-display", "none",
+        "-serial", "tcp:127.0.0.1:" + str(port) + ",server=on,wait=off",
+        "-monitor", "tcp:127.0.0.1:" + str(monitor_port) + ",server=on,wait=off",
+    ]
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    connection = None
+    session = None
+    monitor = None
+    try:
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            if process.poll() is not None:
+                raise CheckFailure("gui QEMU exited early")
+            try:
+                connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                break
+            except OSError:
+                time.sleep(0.2)
+        if connection is None:
+            raise CheckFailure("could not connect to the gui serial port")
+        session = SerialSession(connection)
+        session.send_line("")
+        session.wait_for("z-os:", 20)
+        session.send_line("gui")
+        session.wait_for("gui: desktop active", 20)
+        monitor = MonitorSession(monitor_port)
+        time.sleep(0.5)
+        shot = BUILD / "gui-desktop.ppm"
+        monitor.screendump(shot)
+        image = Image.open(shot).convert("RGB")
+        if image.size != (800, 600):
+            raise CheckFailure("gui desktop resolution is " + str(image.size))
+        status_pixel = image.getpixel((5, 5))
+        taskbar_pixel = image.getpixel((5, 590))
+        wallpaper_pixel = image.getpixel((400, 300))
+        icon_pixel = image.getpixel((30, 55))
+        if status_pixel != (0x20, 0x30, 0x40):
+            raise CheckFailure("gui status bar pixel mismatch: " + str(status_pixel))
+        if taskbar_pixel != (0x1B, 0x24, 0x30):
+            raise CheckFailure("gui taskbar pixel mismatch: " + str(taskbar_pixel))
+        if wallpaper_pixel != (0x10, 0x18, 0x20):
+            raise CheckFailure("gui wallpaper pixel mismatch: " + str(wallpaper_pixel))
+        if icon_pixel != (0x2F, 0x41, 0x52):
+            raise CheckFailure("gui desktop icon pixel mismatch: " + str(icon_pixel))
+        monitor.sendkey("1")
+        session.wait_for("gui: opened Files", 15)
+        time.sleep(0.5)
+        shot_window = BUILD / "gui-window.ppm"
+        monitor.screendump(shot_window)
+        window_image = Image.open(shot_window).convert("RGB")
+        colors = window_image.getcolors(maxcolors=1000000)
+        title_pixels = sum(count for count, color in colors if color == (0x2F, 0x6F, 0xB5))
+        if title_pixels < 500:
+            raise CheckFailure("gui window title bar is not rendered")
+        session.send_line("exit")
+        session.wait_for("gui: exited desktop", 20)
+        session.wait_for("z-os:", 20)
+        time.sleep(0.5)
+        text = monitor.vga_text()
+        if "Z-OS" not in text and "z-os" not in text:
+            raise CheckFailure("gui exit did not restore the text console")
+        start = len(session.snapshot())
+        session.send_line("cat /README")
+        prompt = session.wait_for("z-os:", 10, start + 12)
+        segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
+        if "Z-OS is a small 64-bit operating system." not in segment:
+            raise CheckFailure("shell did not resume after gui exit")
+        print("gui desktop pixels, window chrome, and mode switch PASS")
+        session.send_line("shutdown")
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise CheckFailure("gui test did not power off")
+    finally:
+        if monitor is not None:
+            monitor.close()
+        if session is not None:
+            session.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "keyboard", "shell", "all"])
+    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "gui", "keyboard", "shell", "all"])
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     if args.action == "build":
@@ -490,6 +747,10 @@ def main():
         run_smoke()
     if args.action in ("bootcheck", "all"):
         run_bootcheck()
+    if args.action in ("storage", "all"):
+        run_storage()
+    if args.action in ("gui", "all"):
+        run_gui()
     if args.action in ("keyboard", "all"):
         run_keyboard()
     if args.action in ("shell", "all"):

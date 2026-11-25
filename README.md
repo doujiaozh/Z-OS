@@ -4,10 +4,11 @@ Z-OS is a from-scratch, 64-bit operating system for the x86_64 PC platform.
 It boots on BIOS through a two-stage loader into a freestanding C kernel and
 provides a small but real protected-mode environment: preemptive kernel
 threads, a preemptive user-process scheduler with per-process address spaces,
-a shared kernel high-half mapping, a kernel heap, a virtual filesystem backed
-by ramfs, ring-3 ELF64 processes with POSIX-style primitives (descriptor
-tables, credentials, signals, timed waits), a framebuffer graphics stack with
-bitmap fonts, PS/2 mouse support and a compositor, an interactive shell, and
+a shared kernel high-half mapping, a kernel heap, a ramfs virtual filesystem,
+an ATA PIO block driver with a persistent Z-OS filesystem, ring-3 ELF64
+processes with POSIX-style primitives, a framebuffer graphics stack with bitmap
+fonts, PS/2 mouse events and a compositor, a modern desktop environment with
+status bar, taskbar, icons and draggable windows, an interactive shell, and
 automated boot-time self-tests.
 
 This repository is an engineering foundation, not a replacement for Windows,
@@ -17,7 +18,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 0.5.0, codename POSIX. Development quality. Not production ready.
+Version 0.6.0, codename Desktop. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -26,12 +27,13 @@ Version 0.5.0, codename POSIX. Development quality. Not production ready.
 | Interrupts | PIC remap, PIT at 100 Hz, PS/2 keyboard, serial RX, RTC |
 | Memory | E820 frame bitmap, 4-level paging, per-process PML4, shared high-half direct map |
 | Processes | PID table, ready queue, isolated address spaces, descriptor tables |
+| Storage | ATA PIO block device, persistent ZFS image, /disk VFS mount |
 | Scheduling | Preemptive kernel threads, time-sliced user processes, timed wait queues |
 | Filesystem | In-memory VFS and ramfs, 128 nodes, 1 MiB maximum file size |
 | User mode | Ring-3 static ELF64 C process, TSS kernel stack, `int 0x80` syscalls |
-| Graphics | PCI VGA, gfx surfaces, window manager, 8x16 font, mouse cursor, compositor |
+| Graphics | PCI VGA, gfx surfaces, fonts, mouse events, compositor, desktop shell |
 | Shell | Directory and file commands, system information, ELF process launcher |
-| Verification | 194 in-kernel tests, boot smoke test, interactive shell test |
+| Verification | 253 in-kernel tests, boot smoke, storage replay, desktop pixel test |
 
 Implemented and verified:
 
@@ -170,7 +172,7 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 194 in-kernel checks covering physical memory,
+The self-test image runs 253 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
 ELF64 validation, per-process address spaces, high-half mapping, process
 lifecycle, preemptive time slicing, fork continuation, blocking wait,
@@ -184,7 +186,12 @@ The boot fault check re-verifies the image stage digests against the build
 manifest, boots both images with QEMU interrupt tracing, and fails on any
 triple fault, page-fault exception, or VGA loader error text. It also decodes
 the VGA text buffer to confirm the kernel banner and shell prompt are actually
-on screen. The keyboard
+on screen. The storage stage writes a file to the ATA disk, powers the guest
+off, boots again with the same disk image, and asserts the file content is
+recovered. The GUI stage enters the desktop, decodes a framebuffer screendump
+to assert status bar, taskbar, wallpaper and icon pixels, opens a window
+through the keyboard, checks the rendered title bar, types exit over the serial
+console, and then verifies the shell is back in VGA text mode. The keyboard
 check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a
@@ -365,7 +372,9 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `pwd`, `cd`, `ls`, `cat`, `mkdir`, `rmdir`, `touch`, `write`, `append`,
 `rm`, `mv`, `cp`, `stat`, `hexdump`, `df`, `mem`, `free`, `uptime`, `date`,
 `ps`, `threads`, `sleep`, `history`, `rand`, `usertest`, `schedtest`,
-`forktest`, `postest`, `guitest2`, `gfx`, `reboot`, and `shutdown`.
+`forktest`, `postest`, `guitest2`, `gfx`, `diskinfo`, `format`, `zmount`,
+`zls`, `zsave`, `zcat`, `zrm`, `zsync`, `gui`, `exit`, `reboot`, and
+`shutdown`.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and
@@ -386,12 +395,12 @@ boot/          BIOS stage 1, stage 2, and loader constants
 kernel/        freestanding C and NASM kernel
   arch/        entry, GDT, IDT stubs, thread and process context switch
   cpu/         GDT, IDT, PIC, ELF64 loader, power
-  drivers/     console, serial, keyboard, input queue, PIT, RTC, display registry
-  fs/          VFS, ramfs, file descriptor tables
+  drivers/     console, serial, keyboard, input queue, PIT, RTC, display registry, ATA PIO
+  fs/          VFS, ramfs, file descriptor tables, ZFS persistent filesystem
   include/     shared kernel interfaces and ELF definitions
   lib/         string and formatted output
   mm/          physical memory, paging, address spaces, heap
-  gui/         framebuffer, graphics context, window manager, font, mouse, compositor
+  gui/         framebuffer, graphics context, window manager, font, mouse, compositor, desktop
   sched/       preemptive kernel thread scheduler
   shell/       interactive shell
   subsys/      syscall dispatch

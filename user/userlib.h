@@ -43,6 +43,8 @@ struct mouse_user_state {
 #define ZO_SYS_KILL 19
 #define ZO_SYS_SIGRETURN 20
 #define ZO_SYS_SIGPROCMASK 21
+#define ZO_SYS_GUI_ENTER 25
+#define ZO_SYS_GUI_EXIT 26
 
 static inline long zsys3(long number, long first, long second, long third) {
     __asm__ volatile("int $0x80"
@@ -156,6 +158,16 @@ static inline long zfb_pixel(long x, long y) {
 
 static inline long zfb_text(long x, long y, long color, const char *text) {
     return zsys5(23, x, y, color, (long)text, 0);
+}
+
+static inline long zgui_enter(void)
+{
+    return zsys3(ZO_SYS_GUI_ENTER, 0, 0, 0);
+}
+
+static inline long zgui_exit(void)
+{
+    return zsys3(ZO_SYS_GUI_EXIT, 0, 0, 0);
 }
 
 static inline long zmouse(struct mouse_user_state *state) {

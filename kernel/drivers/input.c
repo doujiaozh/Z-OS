@@ -41,6 +41,19 @@ int input_getchar(void) {
     }
 }
 
+int input_trygetchar(void) {
+    u64 flags = irq_save();
+    u32 tail = input_tail;
+    if (tail != __atomic_load_n(&input_head, __ATOMIC_ACQUIRE)) {
+        char character = input_buffer[tail];
+        __atomic_store_n(&input_tail, (tail + 1) % INPUT_BUFFER_SIZE, __ATOMIC_RELEASE);
+        irq_restore(flags);
+        return (u8)character;
+    }
+    irq_restore(flags);
+    return -1;
+}
+
 void input_flush(void) {
     __atomic_store_n(&input_tail, __atomic_load_n(&input_head, __ATOMIC_ACQUIRE), __ATOMIC_RELEASE);
 }

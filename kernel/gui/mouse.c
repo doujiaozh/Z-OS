@@ -27,6 +27,15 @@ static u32 saved_pixels[MOUSE_CURSOR_WIDTH * MOUSE_CURSOR_HEIGHT];
 static bool cursor_saved = false;
 static i32 saved_x = 0;
 static i32 saved_y = 0;
+static struct mouse_event event_queue[MOUSE_QUEUE_SIZE];
+static u32 event_head = 0;
+static u32 event_tail = 0;
+static u32 event_count = 0;
+static bool gui_mode = false;
+static bool text_cursor_drawn = false;
+static i32 text_cursor_column = -1;
+static i32 text_cursor_row = -1;
+static u16 text_cursor_saved[2][2];
 
 static void ps2_wait_input(void) {
     for (u32 spin = 0; spin < 100000; spin++) {
@@ -94,6 +103,129 @@ void mouse_init(void) {
     state.initialized = true;
 }
 
+void mouse_event_init(void) {
+    mouse_move_to(752, 568);
+    event_head = 0;
+    event_tail = 0;
+    event_count = 0;
+    gui_mode = false;
+    text_cursor_drawn = false;
+    text_cursor_column = -1;
+    text_cursor_row = -1;
+}
+
+void mouse_inject_event(u8 type, i32 x, i32 y, i32 delta_x, i32 delta_y, u32 buttons) {
+    u32 next = (event_head + 1) % MOUSE_QUEUE_SIZE;
+    if (next == event_tail) {
+        event_tail = (event_tail + 1) % MOUSE_QUEUE_SIZE;
+        if (event_count > 0) {
+            event_count--;
+        }
+    }
+    struct mouse_event *event = &event_queue[event_head];
+    event->type = type;
+    event->x = x;
+    event->y = y;
+    event->delta_x = delta_x;
+    event->delta_y = delta_y;
+    event->buttons = buttons;
+    event_head = next;
+    event_count++;
+}
+
+bool mouse_pop_event(struct mouse_event *event) {
+    if (event == NULL || event_count == 0 || event_tail == event_head) {
+        return false;
+    }
+    *event = event_queue[event_tail];
+    event_tail = (event_tail + 1) % MOUSE_QUEUE_SIZE;
+    event_count--;
+    return true;
+}
+
+u32 mouse_event_count(void) {
+    return event_count;
+}
+
+void mouse_set_gui_mode(bool enabled) {
+    gui_mode = enabled;
+    if (enabled) {
+        mouse_text_cursor_restore();
+    }
+}
+
+bool mouse_gui_mode(void) {
+    return gui_mode;
+}
+
+static volatile u16 *text_vga(void) {
+    return (volatile u16 *)0xB8000;
+}
+
+bool mouse_text_cursor_visible(void) {
+    return text_cursor_drawn;
+}
+
+i32 mouse_text_cursor_column(void) {
+    return text_cursor_column;
+}
+
+i32 mouse_text_cursor_row(void) {
+    return text_cursor_row;
+}
+
+void mouse_text_cursor_restore(void) {
+    if (!text_cursor_drawn) {
+        return;
+    }
+    for (i32 row = 0; row < 2; row++) {
+        for (i32 column = 0; column < 2; column++) {
+            i32 cell_column = text_cursor_column + column;
+            i32 cell_row = text_cursor_row + row;
+            if (cell_column < 0 || cell_column >= 80 || cell_row < 0 || cell_row >= 25) {
+                continue;
+            }
+            text_vga()[(u32)cell_row * 80 + (u32)cell_column] = text_cursor_saved[row][column];
+        }
+    }
+    text_cursor_drawn = false;
+}
+
+void mouse_text_cursor_update(void) {
+    if (gui_mode) {
+        return;
+    }
+    i32 column = state.x / 8;
+    i32 row = state.y / 16;
+    if (column < 0) {
+        column = 0;
+    }
+    if (row < 0) {
+        row = 0;
+    }
+    if (column > 78) {
+        column = 78;
+    }
+    if (row > 23) {
+        row = 23;
+    }
+    if (text_cursor_drawn && column == text_cursor_column && row == text_cursor_row) {
+        return;
+    }
+    mouse_text_cursor_restore();
+    text_cursor_column = column;
+    text_cursor_row = row;
+    for (i32 local_row = 0; local_row < 2; local_row++) {
+        for (i32 local_column = 0; local_column < 2; local_column++) {
+            i32 cell_column = column + local_column;
+            i32 cell_row = row + local_row;
+            text_cursor_saved[local_row][local_column] = text_vga()[(u32)cell_row * 80 + (u32)cell_column];
+            text_vga()[(u32)cell_row * 80 + (u32)cell_column] = (u16)(0x4F00 | (u16)'\xDB');
+        }
+    }
+    text_cursor_drawn = true;
+}
+
 void mouse_process_packet(const u8 *packet) {
     if (packet == NULL) {
         return;
@@ -110,6 +242,7 @@ void mouse_process_packet(const u8 *packet) {
     if ((packet[0] & 0x20) != 0) {
         delta_y |= 0xFFFFFF00;
     }
+    u32 previous_buttons = state.buttons;
     state.buttons = packet[0] & 0x07;
     state.x += delta_x;
     state.y -= delta_y;
@@ -126,6 +259,12 @@ void mouse_process_packet(const u8 *packet) {
         state.y = (i32)screen_height - 1;
     }
     state.packets++;
+    if (delta_x != 0 || delta_y != 0) {
+        mouse_inject_event(MOUSE_EVENT_MOVE, state.x, state.y, delta_x, -delta_y, state.buttons);
+    }
+    if (state.buttons != previous_buttons) {
+        mouse_inject_event(MOUSE_EVENT_BUTTON, state.x, state.y, 0, 0, state.buttons);
+    }
 }
 
 void mouse_irq_handler(void) {

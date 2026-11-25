@@ -4,8 +4,8 @@
 #include "types.h"
 
 #define Z_OS_NAME "Z-OS"
-#define Z_OS_VERSION "0.5.0"
-#define Z_OS_CODENAME "POSIX"
+#define Z_OS_VERSION "0.6.0"
+#define Z_OS_CODENAME "Desktop"
 
 #define DISPLAY_MAX_DEVICES 8
 #define FRAMEBUFFER_FORMAT_UNKNOWN 0

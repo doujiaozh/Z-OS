@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.5.0 implementation as it exists in this
+This document describes the Z-OS 0.6.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.5.0:
+Non-goals for 0.6.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -35,6 +35,7 @@ Non-goals for 0.5.0:
 | Keyboard | PS/2 scan-code set 1, interrupt vector 33 |
 | Serial | 16550-compatible COM1 at 0x3F8, interrupt vector 36 |
 | Mouse | PS/2 auxiliary device, interrupt vector 44 |
+| Storage | ATA primary channel polled PIO at 0x1F0, control 0x3F6 |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
 
@@ -577,6 +578,8 @@ Syscall ABI:
 | 22 | dup | RDI=descriptor | new descriptor or -1 |
 | 23 | fb_text | RDI=x, RSI=y, RDX=color, R10=text | 0 or -1 |
 | 24 | mouse | RDI=state buffer | 0 or -1 |
+| 25 | gui_enter | none | requests a desktop session |
+| 26 | gui_exit | none | requests leaving the desktop session |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -641,6 +644,110 @@ display-device registry introduced in 0.3.0: a locked table of up to eight
 initialize/set-mode/present/shutdown hooks. The registry is independent of the
 PCI framebuffer driver and is covered by its own regression test.
 
+## ATA storage
+
+`kernel/drivers/ata.c` drives the primary ATA channel in polled PIO mode:
+
+- Reset and drive selection on the primary bus at 0x1F0, control port 0x3F6.
+- `IDENTIFY DEVICE` (0xEC) reads the model string and the 28-bit LBA sector
+  count. The kernel prints the device line during boot.
+- Reads (0x20) and writes (0x30) transfer one sector at a time through the
+  16-bit data port. After every transfer the driver waits for BSY to clear
+  before the next command, and `FLUSH CACHE` (0xE7) is issued after writes and
+  waited on, which was required for the QEMU emulate device to commit data.
+- Errors map to absent, timeout, I/O and range results. Polling keeps the
+  driver deterministic for automated tests, at the cost of throughput.
+
+## ZFS persistent filesystem
+
+`kernel/fs/zfs.c` implements the Z-OS File System, a small persistent
+filesystem. It is unrelated to OpenZFS and shares only the name. Layout:
+
+| Region | Sectors | Contents |
+| --- | --- | --- |
+| Superblock | 0 | magic, version, block size, sector count, data start, file count |
+| File table | 1 to 2 | 16 entries of 48 bytes: name, size, first sector, used |
+| Data area | 64 onward | 128 contiguous sectors per file slot, 64 KiB per file |
+
+- `zfs_format` writes the superblock and an empty table.
+- `zfs_mount` validates the magic, version and block size, then reloads the
+  table from disk.
+- `zfs_write_file` allocates a slot, writes the payload sectors zero padded,
+  then rewrites the superblock and file table.
+- `zfs_read_file`, `zfs_remove_file`, `zfs_list` and `zfs_file_count` operate
+  on the in-memory table.
+- `zfs_mount_vfs` creates `/disk` and populates it with VFS file nodes whose
+  contents are read from disk, so the mounted namespace is reachable through
+  normal VFS lookups.
+- `zfs_sync_vfs` walks `/disk` in the VFS, writes every regular file back to
+  ZFS, removes disk entries whose VFS nodes disappeared, and flushes the
+  device.
+
+Limitations: fixed 16-file table, contiguous allocation, 64 KiB per file, no
+checksums, no journaling, no crash consistency, no permissions, no
+directories on disk.
+
+## Mouse events and text-mode pointer
+
+`kernel/gui/mouse.c` extends the PS/2 driver:
+
+- IRQ12 packets are decoded into relative delta, absolute clamped position and
+  button state.
+- Every packet with motion and every button change pushes a `mouse_event` into
+  a 32-entry ring buffer. Events carry type, absolute position, delta and
+  button mask; `mouse_pop_event` drains them for the desktop loop.
+- `mouse_inject_event` allows the kernel and tests to feed the same queue
+  without hardware.
+- `mouse_text_cursor_update` draws a two by two cell block over the VGA text
+  buffer, saving the cells it covers, and restores them when the pointer moves
+  or when the console needs the cells. `console_putc_unlocked` restores the
+  pointer before every character, so console output cannot be corrupted by the
+  overlay. The timer tick refreshes the pointer at 100 Hz.
+- Graphics mode sets a flag that suppresses the text pointer while the
+  framebuffer cursor is active.
+
+## Desktop environment
+
+`kernel/gui/desktop.c` builds the desktop on top of the window manager:
+
+- Layout: 28-pixel status bar at the top, desktop icon column on the left,
+  wallpaper, and a 36-pixel taskbar at the bottom.
+- Four applications: Files, Terminal, System Monitor, and Exit. Each opens a
+  titled window with painted content.
+- Rendering clears the wallpaper, draws icons and labels, composites windows
+  through `wm_compose`, then draws the status bar and taskbar above the
+  windows, and finally the caller draws the mouse cursor.
+- Hit testing covers icons, window title bars, close buttons, window bodies and
+  taskbar buttons including the exit control.
+- Interaction: icon click opens or raises an application; title bar press
+  starts a drag that follows pointer motion and ends on release; close button
+  destroys the window; taskbar buttons hide or restore windows; the exit
+  control or the Esc key or a typed `exit` command ends the session.
+- Keyboard behavior: digits 1 to 4 open applications, printable characters are
+  collected into a command buffer, and Enter evaluates `exit`, `quit`, `close`
+  or `gui`.
+
+`kernel/gui/wm.c` gained window titles, title-bar rendering, a close box with a
+cross, geometric hit tests, raise by z-order, visibility toggles and
+`wm_compose` for framed composition. `wm_draw_to` still composites content
+only, so earlier window-manager tests keep their original pixel semantics.
+
+## GUI mode switching
+
+The shell owns the console, so the desktop runs as a session inside the shell
+thread:
+
+- `gui` calls `gui_run_session`: set the framebuffer mode, mark graphics input
+  mode, initialize the desktop, then loop on mouse events and non-blocking
+  keyboard input, re-rendering after each event.
+- `exit` typed inside the desktop, the Esc key, or the taskbar exit control
+  ends the loop. The session restores text mode by disabling VBE and
+  reprogramming the VGA sequencer, CRTC, graphics controller and attribute
+  controller for 80x25 text mode, so the console is genuinely usable again.
+- Syscalls 25 and 26 (`gui_enter`, `gui_exit`) set request flags that the shell
+  checks after each command, so a ring-3 program can ask for a session change
+  without owning the console.
+
 ## Console and shell
 
 The console driver writes VGA text memory and mirrors output to COM1. Newlines
@@ -688,8 +795,8 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 8. Place the kernel after stage 2 in a zeroed 1.44 MiB image.
 9. Write sizes and SHA-256 hashes to `build/manifest.json`.
 
-The compiler include path adds `kernel/mm`, `kernel/task`, `kernel/gui`, and
-`kernel/fs` for the
+The compiler include path adds `kernel/mm`, `kernel/task`, `kernel/gui`,
+`kernel/fs`, and `kernel/drivers` for the
 address-space and process interfaces. New C files are discovered recursively
 by the build script.
 
@@ -715,5 +822,5 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
   compatibility, floppy geometry support, and chipset-specific power control.
 - The kernel assumes exactly one CPU and does not program the local APIC.
 
-These boundaries are intentional for a 0.5.0 foundation and are tracked in
+These boundaries are intentional for a 0.6.0 foundation and are tracked in
 the roadmap.

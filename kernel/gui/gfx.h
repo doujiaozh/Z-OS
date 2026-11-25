@@ -26,6 +26,7 @@ void gfx_fill_rect(struct gfx_surface *surface, i32 x, i32 y, u32 width, u32 hei
 void gfx_hline(struct gfx_surface *surface, i32 x, i32 y, u32 length, u32 color);
 void gfx_vline(struct gfx_surface *surface, i32 x, i32 y, u32 length, u32 color);
 void gfx_frame_rect(struct gfx_surface *surface, i32 x, i32 y, u32 width, u32 height, u32 color);
+void gfx_line(struct gfx_surface *surface, i32 x0, i32 y0, i32 x1, i32 y1, u32 color);
 void gfx_copy_rect(struct gfx_surface *destination, const struct gfx_surface *source,
                    i32 source_x, i32 source_y, i32 destination_x, i32 destination_y,
                    u32 width, u32 height);

@@ -15,6 +15,7 @@ void input_init(void);
 void input_push(char character);
 bool input_available(void);
 int input_getchar(void);
+int input_trygetchar(void);
 void input_flush(void);
 
 #endif

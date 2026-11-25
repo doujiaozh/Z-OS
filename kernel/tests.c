@@ -1,7 +1,9 @@
 #include "tests.h"
+#include "ata.h"
 #include "compositor.h"
 #include "console.h"
 #include "cred.h"
+#include "desktop.h"
 #include "elf.h"
 #include "fd.h"
 #include "font.h"
@@ -27,6 +29,7 @@
 #include "user.h"
 #include "vfs.h"
 #include "vmm.h"
+#include "zfs.h"
 #include "wm.h"
 
 static u32 tests_passed = 0;
@@ -931,6 +934,244 @@ static void test_extended_graphics(void)
     check(process_count() == 0, "extended graphics processes are reaped");
 }
 
+static void test_storage(void)
+{
+    check(ata_present(), "ata primary master device is detected");
+    check(ata_sector_count() >= 4096, "ata device reports a usable sector count");
+    u8 original[512];
+    u8 pattern[512];
+    u8 readback[512];
+    u32 lba = ata_sector_count() - 8;
+    bool io_ok = false;
+    if (ata_read_sectors(lba, 1, original) == 0) {
+        for (u32 index = 0; index < 512; index++) {
+            pattern[index] = (u8)(index * 7 + 3);
+        }
+        if (ata_write_sectors(lba, 1, pattern) == 0) {
+            memset(readback, 0, sizeof(readback));
+            if (ata_read_sectors(lba, 1, readback) == 0 && memcmp(pattern, readback, 512) == 0) {
+                io_ok = true;
+            }
+        }
+        ata_write_sectors(lba, 1, original);
+    }
+    check(io_ok, "ata sector write and readback match");
+    check(zfs_format() == ZFS_ERROR_NONE, "zfs formats the ata disk");
+    check(zfs_mount() == ZFS_ERROR_NONE && zfs_mounted(), "zfs mounts its superblock");
+    const char *payload = "persistent-storage-roundtrip";
+    check(zfs_write_file("selftest.txt", payload, (u32)strlen(payload)) == ZFS_ERROR_NONE,
+          "zfs writes a file to disk");
+    char buffer[128];
+    memset(buffer, 0, sizeof(buffer));
+    int read = zfs_read_file("selftest.txt", buffer, sizeof(buffer) - 1);
+    check(read == (int)strlen(payload) && strcmp(buffer, payload) == 0, "zfs reads file data back");
+    struct zfs_dirent dirents[ZFS_MAX_FILES];
+    memset(dirents, 0, sizeof(dirents));
+    u32 count = zfs_list(dirents, ZFS_MAX_FILES);
+    check(count == 1 && strcmp(dirents[0].name, "selftest.txt") == 0, "zfs lists the stored file");
+    check(zfs_mount() == ZFS_ERROR_NONE && zfs_file_count() == 1, "zfs reloads metadata from disk");
+    memset(buffer, 0, sizeof(buffer));
+    read = zfs_read_file("selftest.txt", buffer, sizeof(buffer) - 1);
+    check(read > 0 && strcmp(buffer, payload) == 0, "zfs data survives a metadata reload");
+    check(zfs_mount_vfs() == ZFS_ERROR_NONE, "zfs attaches its files under /disk");
+    struct vfs_node *node = vfs_lookup(vfs_root(), "/disk/selftest.txt");
+    check(node != NULL && vfs_is_file(node), "vfs exposes the mounted zfs file");
+    if (node != NULL) {
+        char vfs_buffer[128];
+        memset(vfs_buffer, 0, sizeof(vfs_buffer));
+        int vfs_count = vfs_read(node, 0, vfs_buffer, sizeof(vfs_buffer) - 1);
+        check(vfs_count == (int)strlen(payload) && strcmp(vfs_buffer, payload) == 0,
+              "vfs file content matches the zfs payload");
+    } else {
+        check(false, "vfs file content matches the zfs payload");
+    }
+    check(zfs_remove_file("selftest.txt") == ZFS_ERROR_NONE, "zfs removes a file");
+    check(zfs_file_count() == 0, "zfs removes the directory entry");
+}
+
+static void test_mouse_events(void)
+{
+    mouse_event_init();
+    check(mouse_event_count() == 0, "mouse event queue starts empty");
+    mouse_inject_event(MOUSE_EVENT_MOVE, 120, 90, 4, -3, 0);
+    struct mouse_event event;
+    bool popped = mouse_pop_event(&event);
+    check(popped && event.type == MOUSE_EVENT_MOVE && event.x == 120 && event.y == 90 &&
+          event.delta_x == 4 && event.delta_y == -3, "mouse move events carry coordinates");
+    mouse_inject_event(MOUSE_EVENT_BUTTON, 120, 90, 0, 0, MOUSE_BUTTON_LEFT);
+    popped = mouse_pop_event(&event);
+    check(popped && event.type == MOUSE_EVENT_BUTTON && (event.buttons & MOUSE_BUTTON_LEFT) != 0,
+          "mouse button events carry button state");
+    check(mouse_event_count() == 0 && !mouse_pop_event(&event), "mouse event queue drains in order");
+    mouse_inject_event(MOUSE_EVENT_MOVE, 10, 10, 1, 1, 0);
+    mouse_inject_event(MOUSE_EVENT_BUTTON, 10, 10, 0, 0, MOUSE_BUTTON_RIGHT);
+    check(mouse_pop_event(&event) && event.type == MOUSE_EVENT_MOVE, "mouse queue preserves fifo order");
+    check(mouse_pop_event(&event) && event.type == MOUSE_EVENT_BUTTON, "mouse queue delivers queued buttons");
+    u8 packet[3];
+    packet[0] = 0x08;
+    packet[1] = 6;
+    packet[2] = 2;
+    mouse_process_packet(packet);
+    check(mouse_event_count() > 0, "hardware packets generate mouse events");
+    while (mouse_pop_event(&event)) {
+    }
+}
+
+static void test_text_cursor(void)
+{
+    mouse_set_gui_mode(false);
+    mouse_move_to(80, 96);
+    mouse_text_cursor_restore();
+    mouse_text_cursor_update();
+    bool visible = mouse_text_cursor_visible();
+    i32 column = mouse_text_cursor_column();
+    i32 row = mouse_text_cursor_row();
+    volatile u16 *vga = (volatile u16 *)0xB8000;
+    u16 cell = vga[(u32)row * 80 + (u32)column];
+    mouse_text_cursor_restore();
+    bool restored_visible = mouse_text_cursor_visible();
+    check(visible, "text mode mouse cursor is drawn");
+    check(column == 10 && row == 6, "text cursor tracks the mouse position");
+    check((cell & 0x0F00) == 0x0F00 && (cell & 0x00FF) == 0x00DB, "text cursor cell uses the overlay glyph");
+    check(!restored_visible, "text cursor restores the console cell");
+    mouse_set_gui_mode(true);
+    mouse_move_to(200, 200);
+    mouse_text_cursor_update();
+    check(!mouse_text_cursor_visible(), "graphics mode suppresses the text cursor");
+    mouse_set_gui_mode(false);
+    mouse_move_to(752, 568);
+}
+
+static void test_wm_frames(void)
+{
+    static u32 frame_pixels[400 * 300];
+    struct gfx_surface target;
+    gfx_init_surface(&target, frame_pixels, 400, 300, 400, GFX_FORMAT_RGB32);
+    gfx_clear(&target, 0);
+    wm_init();
+    struct wm_window *window = wm_create(40, 30, 200, 120, 0x00F0F4FAU);
+    check(window != NULL, "wm creates a titled window");
+    if (window == NULL) {
+        return;
+    }
+    wm_set_title(window, "Files");
+    gfx_fill_rect(&window->surface, 0, 0, 200, 120, 0x00F0F4FAU);
+    check(wm_compose(&target) == 0, "wm composes framed windows");
+    check(gfx_get_pixel(&target, 45, 35) == 0x002F6FB5U, "wm draws the window title bar");
+    check(gfx_get_pixel(&target, 40 + 200 - 12, 30 + 4) == 0x00C43B3BU, "wm draws the close button");
+    check(wm_close_hit(window, 40 + 200 - 10, 30 + 8), "wm close hit test matches the button");
+    check(!wm_close_hit(window, 60, 60), "wm close hit test rejects the window body");
+    check(wm_title_hit(window, 60, 40) && !wm_title_hit(window, 60, 100),
+          "wm title hit test separates title and body");
+    check(wm_window_at_point(45, 35) == window, "wm finds the window under a point");
+    struct wm_window *second = wm_create(80, 60, 120, 80, 0x00E6ECF6U);
+    check(second != NULL, "wm creates a second stacked window");
+    if (second != NULL) {
+        wm_set_title(second, "Terminal");
+        wm_raise(window->id);
+        check(wm_zorder_at(wm_count() - 1) == window->id, "wm raise moves the window to the top");
+        wm_destroy(second->id);
+    }
+    wm_destroy(window->id);
+    check(wm_count() == 0, "wm frame test reaps its windows");
+}
+
+static void test_desktop(void)
+{
+    static u32 desktop_pixels[800 * 600];
+    struct gfx_surface surface;
+    gfx_init_surface(&surface, desktop_pixels, 800, 600, 800, GFX_FORMAT_RGB32);
+    desktop_init(&surface);
+    desktop_render();
+    check(gfx_get_pixel(&surface, 5, 5) == DESKTOP_COLOR_STATUS, "desktop renders the status bar");
+    check(gfx_get_pixel(&surface, 5, 590) == DESKTOP_COLOR_TASKBAR, "desktop renders the taskbar");
+    check(gfx_get_pixel(&surface, 400, 300) == DESKTOP_COLOR_WALLPAPER, "desktop renders the wallpaper");
+    check(desktop_window_count() == 0, "desktop starts without open windows");
+    u32 icon_index = 99;
+    check(desktop_icon_at(30, 60, &icon_index) && icon_index == 0,
+          "desktop icon hit test finds the first icon");
+    struct mouse_event event;
+    memset(&event, 0, sizeof(event));
+    u32 clicks = desktop_click_count();
+    event.type = MOUSE_EVENT_BUTTON;
+    event.x = 60;
+    event.y = 70;
+    event.buttons = MOUSE_BUTTON_LEFT;
+    check(desktop_handle_mouse(&event), "desktop handles an icon click event");
+    check(desktop_click_count() == clicks + 1 && desktop_app_is_open(0),
+          "desktop icon click opens the files window");
+    check(desktop_window_count() == 1, "desktop tracks the opened window");
+    desktop_render();
+    struct wm_window *window = wm_window_at_point(200, 120);
+    check(window != NULL, "desktop window is present in the composited scene");
+    if (window != NULL) {
+        i32 original_x = window->x;
+        event.type = MOUSE_EVENT_BUTTON;
+        event.x = window->x + 40;
+        event.y = window->y + 6;
+        event.buttons = MOUSE_BUTTON_LEFT;
+        desktop_handle_mouse(&event);
+        check(desktop_dragging_id() == (i32)window->id, "desktop starts dragging from the title bar");
+        event.type = MOUSE_EVENT_MOVE;
+        event.x = window->x + 90;
+        event.y = window->y + 46;
+        event.buttons = MOUSE_BUTTON_LEFT;
+        desktop_handle_mouse(&event);
+        check(window->x == original_x + 50, "desktop drag moves the window by the pointer delta");
+        event.type = MOUSE_EVENT_BUTTON;
+        event.buttons = 0;
+        desktop_handle_mouse(&event);
+        check(desktop_dragging_id() == 0, "desktop ends the drag on button release");
+        i32 close_x = window->x + (i32)window->width - 10;
+        i32 close_y = window->y + 8;
+        event.type = MOUSE_EVENT_BUTTON;
+        event.x = close_x;
+        event.y = close_y;
+        event.buttons = MOUSE_BUTTON_LEFT;
+        desktop_handle_mouse(&event);
+        check(!desktop_app_is_open(0) && desktop_window_count() == 0,
+              "desktop close button closes the window");
+    } else {
+        check(false, "desktop starts dragging from the title bar");
+        check(false, "desktop drag moves the window by the pointer delta");
+        check(false, "desktop ends the drag on button release");
+        check(false, "desktop close button closes the window");
+    }
+    desktop_init(&surface);
+    desktop_render();
+    memset(&event, 0, sizeof(event));
+    event.type = MOUSE_EVENT_BUTTON;
+    event.x = 740;
+    event.y = 600 - DESKTOP_TASKBAR_HEIGHT + 12;
+    event.buttons = MOUSE_BUTTON_LEFT;
+    desktop_handle_mouse(&event);
+    check(desktop_should_exit(), "desktop taskbar exit button requests session exit");
+}
+
+static void test_gui_mode(void)
+{
+    check(fb_set_mode(800, 600, 32) == 0, "gui mode applies the framebuffer mode");
+    struct gfx_surface *surface = fb_surface();
+    check(surface != NULL, "gui mode exposes the framebuffer surface");
+    if (surface != NULL) {
+        desktop_init(surface);
+        desktop_render();
+        check(fb_pixel(5, 5) == DESKTOP_COLOR_STATUS, "gui desktop renders its status bar to the framebuffer");
+        check(fb_pixel(5, 590) == DESKTOP_COLOR_TASKBAR, "gui desktop renders its taskbar to the framebuffer");
+        check(fb_pixel(400, 300) == DESKTOP_COLOR_WALLPAPER, "gui desktop renders its wallpaper to the framebuffer");
+    } else {
+        check(false, "gui desktop renders its status bar to the framebuffer");
+        check(false, "gui desktop renders its taskbar to the framebuffer");
+        check(false, "gui desktop renders its wallpaper to the framebuffer");
+    }
+    mouse_set_gui_mode(true);
+    check(mouse_gui_mode(), "gui mode marks the mouse subsystem for graphics rendering");
+    mouse_set_gui_mode(false);
+    fb_restore_text();
+    console_clear();
+    check(!fb_mode_active(), "gui exit restores text mode");
+}
+
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -956,6 +1197,12 @@ void selftest_thread(void *argument)
     test_compositor();
     test_posix_user_program();
     test_extended_graphics();
+    test_storage();
+    test_mouse_events();
+    test_text_cursor();
+    test_wm_frames();
+    test_desktop();
+    test_gui_mode();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

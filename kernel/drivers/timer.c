@@ -2,6 +2,7 @@
 #include "io.h"
 #include "pic.h"
 #include "thread.h"
+#include "mouse.h"
 #include "sched.h"
 #include "waitq.h"
 
@@ -32,6 +33,7 @@ u64 timer_uptime_ms(void) {
 
 void timer_irq_handler(void) {
     ticks++;
+    mouse_text_cursor_update();
     waitq_expire(ticks);
     sched_user_tick();
     sched_tick();

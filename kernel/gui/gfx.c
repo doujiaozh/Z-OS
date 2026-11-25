@@ -203,3 +203,31 @@ u32 gfx_count_color(const struct gfx_surface *surface, i32 x, i32 y, u32 width, 
     }
     return count;
 }
+
+void gfx_line(struct gfx_surface *surface, i32 x0, i32 y0, i32 x1, i32 y1, u32 color) {
+    if (surface == NULL || !surface->valid) {
+        return;
+    }
+    i32 delta_x = x1 > x0 ? x1 - x0 : x0 - x1;
+    i32 delta_y = y1 > y0 ? y1 - y0 : y0 - y1;
+    i32 step_x = x0 < x1 ? 1 : -1;
+    i32 step_y = y0 < y1 ? 1 : -1;
+    i32 error = delta_x - delta_y;
+    i32 x = x0;
+    i32 y = y0;
+    for (;;) {
+        gfx_plot(surface, x, y, color);
+        if (x == x1 && y == y1) {
+            break;
+        }
+        i32 doubled = error * 2;
+        if (doubled > -delta_y) {
+            error -= delta_y;
+            x += step_x;
+        }
+        if (doubled < delta_x) {
+            error += delta_x;
+            y += step_y;
+        }
+    }
+}

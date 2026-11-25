@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.5.0 POSIX. It is deliberately conservative. The system is a development
+0.6.0 Desktop. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -75,6 +75,15 @@ prototype and must not be used to protect sensitive data.
   the text length at 96 characters.
 - Mouse state is read-only for user processes through a single validated
   structure copy; user code cannot program the PS/2 controller.
+- The ATA driver validates every transfer against the identified sector count
+  and rejects out-of-range requests, so a bad filesystem request cannot wrap
+  the LBA.
+- The ZFS mount validates the superblock magic, version and block size before
+  trusting the file table, and the file table is bounded to 16 entries and
+  64 KiB per file.
+- The desktop session runs inside the kernel shell thread and copies no user
+  pointers, so a user process cannot supply UI state directly; syscalls 25 and
+  26 only set request flags.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -88,6 +97,25 @@ prototype and must not be used to protect sensitive data.
 Each process owns a private PML4 and user page tables, and user frames are not
 shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
+
+Storage and desktop surfaces are not yet a security boundary:
+
+- ZFS has no checksums, journaling or crash consistency. A corrupt or hostile
+  disk image can make file reads return arbitrary data, and a partial write can
+  lose the file table.
+- ZFS has no permissions, ownership or path validation beyond a 32-byte name;
+  any kernel caller can read, write or remove any file on the disk.
+- ATA polling has no timeout recovery protocol beyond status polling, so a
+  wedged device can stall the caller.
+- The desktop trusts global input state: any process that can emit mouse or
+  keyboard events can trigger clicks, drags, window closes and the taskbar exit
+  control.
+- Syscalls 25 and 26 let any process request a desktop session change; the
+  request is honored after the current shell command returns, with no privilege
+  check and no session ownership.
+- The desktop renders into kernel-owned framebuffer memory and reads the whole
+  screen; there is no per-window capability model, damage tracking or clipping
+  against other clients.
 
 This is not yet a complete process security boundary:
 
@@ -121,7 +149,7 @@ This is not yet a complete process security boundary:
 The kernel and every process share a high-half direct map at
 0xFFFFFFFF80000000 and a supervisor device window at 0xFFFFFFFF40000000. Both
 mappings are identical across address spaces and supervisor-only. The kernel
-still executes from the low identity window in 0.5.0, so this is not yet a
+still executes from the low identity window in 0.6.0, so this is not yet a
 fully relocated higher-half kernel.
 
 Window surfaces live in the kernel heap and are composited by kernel code. They
@@ -228,25 +256,30 @@ The current model assumes:
 Within that model, the ring transition, per-process user/supervisor page bits,
 ELF validation, syscall pointer validation in the process address space,
 descriptor table isolation across fork, credential permission checks, signal
-frame validation and CR3 switching, blocking wait restart, framebuffer and font
-call validation, mouse packet decoding, compositor layering, process reaping,
-and exception containment are implemented and tested.
+frame validation and CR3 switching, blocking wait restart, ATA range checks,
+ZFS superblock validation, mouse packet decoding and bounds clamping, text
+pointer save and restore, compositor layering, desktop hit testing, process
+reaping, and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. VFS owner and mode storage so credentials actually gate file access, plus
+1. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
+   permissions and path validation.
+2. VFS owner and mode storage so credentials actually gate file access, plus
    a non-root default identity for spawned processes.
+3. A user-space display client model with clipping, damage and per-window
+   capabilities instead of a kernel-owned desktop.
 2. Ownership checks for `kill`, sessions, process groups, and job control.
-3. NX, W^X, SMEP, SMAP, and UMIP.
-4. Stack guard pages and a slab allocator with redzones.
-5. Descriptor reference counts and per-process quotas.
-6. Copy-on-write fork and per-process memory accounting.
-7. Window ownership, compositor client capabilities, and screen read policy.
-8. Cryptographic random source from hardware or a seeded entropy pool.
-9. ACPI table parsing instead of fixed power ports.
-10. Signed boot and measured boot.
-11. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
-12. KASLR and ASLR.
+4. NX, W^X, SMEP, SMAP, and UMIP.
+5. Stack guard pages and a slab allocator with redzones.
+6. Descriptor reference counts and per-process quotas.
+7. Copy-on-write fork and per-process memory accounting.
+8. Screen read policy and an opt-in input focus model for the desktop.
+9. Cryptographic random source from hardware or a seeded entropy pool.
+10. ACPI table parsing instead of fixed power ports.
+11. Signed boot and measured boot.
+12. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
+13. KASLR and ASLR.
 
 ## Reporting
 

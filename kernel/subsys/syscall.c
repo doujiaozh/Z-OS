@@ -44,6 +44,34 @@
 #define SYS_DUP 22
 #define SYS_FB_TEXT 23
 #define SYS_MOUSE 24
+#define SYS_GUI_ENTER 25
+#define SYS_GUI_EXIT 26
+
+static bool gui_enter_flag = false;
+static bool gui_exit_flag = false;
+
+void gui_request_enter(void) {
+    gui_enter_flag = true;
+    gui_exit_flag = false;
+}
+
+void gui_request_exit(void) {
+    gui_exit_flag = true;
+    gui_enter_flag = false;
+}
+
+bool gui_enter_requested(void) {
+    return gui_enter_flag;
+}
+
+bool gui_exit_requested(void) {
+    return gui_exit_flag;
+}
+
+void gui_clear_requests(void) {
+    gui_enter_flag = false;
+    gui_exit_flag = false;
+}
 
 #define SYSCALL_INT_INSTRUCTION_SIZE 2
 #define SYSCALL_PATH_MAX 128
@@ -443,6 +471,14 @@ void syscall_dispatch(struct registers *registers) {
             break;
         case SYS_MOUSE:
             registers->rax = syscall_mouse(registers);
+            break;
+        case SYS_GUI_ENTER:
+            gui_request_enter();
+            registers->rax = 0;
+            break;
+        case SYS_GUI_EXIT:
+            gui_request_exit();
+            registers->rax = 0;
             break;
         default:
             registers->rax = (u64)-1;

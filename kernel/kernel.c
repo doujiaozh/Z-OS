@@ -1,3 +1,4 @@
+#include "ata.h"
 #include "boot.h"
 #include "console.h"
 #include "gdt.h"
@@ -22,6 +23,7 @@
 #include "vfs.h"
 #include "vmm.h"
 #include "wm.h"
+#include "zfs.h"
 #include "fb.h"
 
 void kmain(struct boot_info *boot) {
@@ -54,11 +56,18 @@ void kmain(struct boot_info *boot) {
     vmm_init();
     heap_init();
     vfs_init();
+    ata_init();
+    if (ata_present()) {
+        kprintf("ATA: primary master, %u sectors, model %s\n", ata_sector_count(), ata_model());
+    } else {
+        kprintf("ATA: no primary master device\n");
+    }
     process_init();
     sched_process_init();
     fb_init();
     wm_init();
     mouse_init();
+    mouse_event_init();
     sched_init();
 
     if (fb_device_found()) {

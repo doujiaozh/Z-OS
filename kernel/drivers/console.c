@@ -1,4 +1,5 @@
 #include "console.h"
+#include "mouse.h"
 #include "serial.h"
 #include "io.h"
 #include "string.h"
@@ -38,6 +39,7 @@ static void console_scroll(void) {
 }
 
 static void console_putc_unlocked(char character) {
+    mouse_text_cursor_restore();
     if (character == '\n') {
         serial_putc('\r');
         serial_putc('\n');
