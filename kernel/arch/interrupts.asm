@@ -65,6 +65,7 @@ STUB_NOERR vec
 %endrep
 
 extern interrupt_dispatch
+extern sched_interrupt_return
 
 isr_common:
     cld
@@ -90,6 +91,13 @@ isr_common:
 
     mov rdi, rsp
     call interrupt_dispatch
+
+    mov rdi, rsp
+    call sched_interrupt_return
+    test rax, rax
+    jz .no_switch
+    mov rsp, rax
+.no_switch:
 
     test byte [rsp + 144], 3
     jz .kernel_data

@@ -7,8 +7,11 @@
 #include "kernel.h"
 #include "lib.h"
 #include "pmm.h"
+#include "fb.h"
+#include "gfx.h"
 #include "power.h"
 #include "process.h"
+#include "sched.h"
 #include "rtc.h"
 #include "string.h"
 #include "thread.h"
@@ -16,6 +19,7 @@
 #include "user.h"
 #include "vfs.h"
 #include "vmm.h"
+#include "wm.h"
 
 static u32 tests_passed = 0;
 static u32 tests_failed = 0;
@@ -224,12 +228,6 @@ static void test_threads(void) {
     }
 }
 
-static void test_user_mode(void) {
-    u64 exit_code = 0;
-    int result = user_run_demo(&exit_code);
-    check(result == 0 && exit_code == 0, "ring-3 user program exits through syscall");
-}
-
 static void test_elf(void) {
     u64 image_size = (u64)(user_program_end - user_program_start);
     u64 entry = 0;
@@ -265,79 +263,6 @@ static void test_elf(void) {
     kfree(mutated);
 }
 
-static void test_processes(void) {
-    u64 image_size = (u64)(user_program_end - user_program_start);
-    struct process *first = process_create("process-a", 0, user_program_start, image_size);
-    struct process *second = process_create("process-b", 0, user_program_start, image_size);
-    check(first != NULL && second != NULL, "process table creates independent processes");
-    if (first == NULL || second == NULL) {
-        return;
-    }
-    check(first->pid != second->pid && first->parent_pid == 0 && second->parent_pid == 0,
-          "process pids and parents are valid");
-    check(first->space.pml4_phys != second->space.pml4_phys,
-          "processes have distinct pml4 roots");
-    u64 first_code = vmm_user_physical(&first->space, ELF_USER_BASE);
-    u64 second_code = vmm_user_physical(&second->space, ELF_USER_BASE);
-    check(first_code != 0 && second_code != 0 && first_code != second_code,
-          "same ELF maps to distinct physical frames");
-    u64 first_high = process_high_half_entry(first);
-    u64 second_high = process_high_half_entry(second);
-    check(first_high == second_high && first_high == vmm_high_pml4_entry(),
-          "kernel high-half mapping is identical across processes");
-    check(vmm_get_physical(KERNEL_HIGH_BASE + 0x100000) == 0x100000,
-          "kernel high-half alias resolves the kernel image");
-    u64 scratch_frame = pmm_alloc_frame();
-    check(scratch_frame != 0 && vmm_map_user_page(&first->space, 0x40080000, scratch_frame,
-                                                 PTE_PRESENT | PTE_WRITABLE | PTE_USER) == 0,
-          "process address space maps a user page");
-    check(vmm_user_physical(&first->space, 0x40080000) == scratch_frame,
-          "process address space reports its user frame");
-    check(vmm_user_physical(&second->space, 0x40080000) == 0,
-          "user mappings are invisible across address spaces");
-    u64 first_pid = first->pid;
-    u64 second_pid = second->pid;
-    u64 first_exit = 0;
-    u64 second_exit = 0;
-    int first_result = process_run(first_pid, &first_exit);
-    int second_result = process_run(second_pid, &second_exit);
-    check(first_result == 0 && first_exit == 0, "first process runs ELF in its own address space");
-    check(second_result == 0 && second_exit == 0, "second process runs ELF in its own address space");
-    u64 status = 0;
-    int waited = process_wait(0, first_pid, &status);
-    check(waited == (int)first_pid && status == 0, "wait reaps the first process");
-    waited = process_wait(0, second_pid, &status);
-    check(waited == (int)second_pid && status == 0, "wait reaps the second process");
-    struct process *parent = process_create("process-parent", 0, user_program_start, image_size);
-    check(parent != NULL, "process table creates a fork parent");
-    if (parent == NULL) {
-        return;
-    }
-    u64 child_pid = 0;
-    int fork_result = process_fork(parent->pid, &child_pid);
-    struct process *child = process_find(child_pid);
-    check(fork_result == PROCESS_ERROR_NONE && child != NULL && child->parent_pid == parent->pid,
-          "fork creates a child with the correct parent");
-    if (child == NULL) {
-        process_exit(parent->pid, 0);
-        process_wait(0, parent->pid, &status);
-        return;
-    }
-    check(child->space.pml4_phys != parent->space.pml4_phys && child->entry == parent->entry,
-          "fork child has an independent address space");
-    check(process_exec(child_pid, user_program_start, image_size) == PROCESS_ERROR_NONE,
-          "exec replaces a process image");
-    check(process_exit(child_pid, 0x33) == PROCESS_ERROR_NONE,
-          "process exit records a status");
-    status = 0;
-    waited = process_wait(parent->pid, child_pid, &status);
-    check(waited == (int)child_pid && status == 0x33,
-          "wait returns the child exit status");
-    process_exit(parent->pid, 0);
-    process_wait(0, parent->pid, &status);
-    check(process_count() == 0, "process table drains after reaping");
-}
-
 static void test_display(void) {
     static struct display_device device;
     memset(&device, 0, sizeof(device));
@@ -362,7 +287,288 @@ static void test_display(void) {
     check(display_unregister(&device) == 0 && display_count() == 0, "display unregisters cleanly");
 }
 
-void selftest_thread(void *argument) {
+static u64 run_program(const char *name, const u8 *image_start, const u8 *image_end, u64 *status)
+{
+    u64 image_size = (u64)(image_end - image_start);
+    struct process *process = process_create(name, 0, image_start, image_size);
+    if (process == NULL) {
+        return 0;
+    }
+    u64 pid = process->pid;
+    u32 completed = 0;
+    int result = sched_run_batch(&pid, 1, &completed);
+    u64 reaped_pid = 0;
+    u64 exit_status = 0xFFFFFFFFFFFFFFFFULL;
+    process_reap_child(0, pid, &reaped_pid, &exit_status);
+    if (result != SCHED_ERROR_NONE || completed != 1 || reaped_pid != pid) {
+        if (status != NULL) {
+            *status = 0xFFFFFFFFFFFFFFFFULL;
+        }
+        return pid;
+    }
+    if (status != NULL) {
+        *status = exit_status;
+    }
+    return pid;
+}
+
+static void test_user_mode(void)
+{
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_program("user-init", user_program_start, user_program_end, &status);
+    check(pid != 0, "user image creates a schedulable process");
+    check(status == 0, "user program exits with status zero under the process scheduler");
+    check(process_count() == 0, "scheduler run leaves no stale process entries");
+}
+
+static void test_address_spaces(void)
+{
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *first = process_create("space-a", 0, user_program_start, image_size);
+    struct process *second = process_create("space-b", 0, user_program_start, image_size);
+    check(first != NULL && second != NULL, "address space test creates two processes");
+    if (first == NULL || second == NULL) {
+        process_reap_zombies();
+        return;
+    }
+    check(first->pid != second->pid && first->parent_pid == 0 && second->parent_pid == 0,
+          "process identifiers and parents are valid");
+    check(first->space.pml4_phys != second->space.pml4_phys, "processes own distinct pml4 roots");
+    u64 first_code = vmm_user_physical(&first->space, ELF_USER_BASE);
+    u64 second_code = vmm_user_physical(&second->space, ELF_USER_BASE);
+    check(first_code != 0 && second_code != 0 && first_code != second_code,
+          "identical elf images map to distinct physical frames");
+    u64 first_high = process_high_half_entry(first);
+    u64 second_high = process_high_half_entry(second);
+    check(first_high == second_high && first_high == vmm_high_pml4_entry(),
+          "kernel high-half entry is shared by all processes");
+    check(vmm_get_physical(KERNEL_HIGH_BASE + 0x10000) == 0x10000,
+          "kernel high-half alias resolves the kernel image");
+    u64 scratch_frame = pmm_alloc_frame();
+    check(scratch_frame != 0 && vmm_map_user_page(&first->space, 0x40080000, scratch_frame,
+                                                 PTE_PRESENT | PTE_WRITABLE | PTE_USER) == 0,
+          "process address space maps a user page");
+    check(vmm_user_physical(&first->space, 0x40080000) == scratch_frame,
+          "process address space reports its own frame");
+    check(vmm_user_physical(&second->space, 0x40080000) == 0,
+          "user mappings stay invisible across address spaces");
+    check(first->kernel_stack_base != 0 && second->kernel_stack_base != 0 &&
+          first->kernel_stack_base != second->kernel_stack_base &&
+          first->kernel_stack_top != first->kernel_stack_base,
+          "each process owns a private kernel stack");
+    process_kill(first->pid, 0);
+    process_kill(second->pid, 0);
+    process_reap_zombies();
+    check(process_count() == 0, "address space test reaps both processes");
+}
+
+static void test_preemption(void)
+{
+    sched_mark_reset();
+    u64 image_size = (u64)(user_multi_end - user_multi_start);
+    struct process *first = process_create("multi-a", 0, user_multi_start, image_size);
+    struct process *second = process_create("multi-b", 0, user_multi_start, image_size);
+    check(first != NULL && second != NULL, "preemptive scheduler creates two user processes");
+    if (first == NULL || second == NULL) {
+        process_reap_zombies();
+        return;
+    }
+    check(sched_quantum_ticks() == PROCESS_QUANTUM_TICKS && sched_quantum_ticks() > 0,
+          "process time quantum is configured");
+    u64 pids[2];
+    pids[0] = first->pid;
+    pids[1] = second->pid;
+    u64 switches_before = sched_preemption_count();
+    u32 completed = 0;
+    int result = sched_run_batch(pids, 2, &completed);
+    check(result == SCHED_ERROR_NONE && completed == 2,
+          "two user processes complete under time slicing");
+    check(sched_marker_total(0x10) == 24, "both processes executed all time-sliced rounds");
+    u64 first_seen = 0;
+    bool both_seen = false;
+    bool interleaved = false;
+    u64 previous_pid = 0;
+    u32 mark_total = sched_mark_count();
+    for (u32 index = 0; index < mark_total; index++) {
+        u64 pid = 0;
+        u64 marker = 0;
+        if (!sched_mark_get(index, &pid, &marker)) {
+            continue;
+        }
+        if (marker != 0x10) {
+            continue;
+        }
+        if (first_seen == 0) {
+            first_seen = pid;
+        } else if (pid != first_seen) {
+            both_seen = true;
+        }
+        if (previous_pid != 0 && previous_pid != pid) {
+            interleaved = true;
+        }
+        previous_pid = pid;
+    }
+    check(both_seen, "both processes appear in the execution trace");
+    check(interleaved, "time slicing interleaves both processes");
+    check(sched_preemption_count() > switches_before, "timer interrupts preempted running processes");
+    check(sched_switch_count_of(first->pid) > 0 && sched_switch_count_of(second->pid) > 0,
+          "both processes recorded forced context switches");
+    u64 first_status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 second_status = 0xFFFFFFFFFFFFFFFFULL;
+    process_reap_child(0, first->pid, NULL, &first_status);
+    process_reap_child(0, second->pid, NULL, &second_status);
+    check(first_status == 0 && second_status == 0, "both sliced processes exited cleanly");
+    check(process_count() == 0, "preemptive run reaps every process");
+}
+
+static u32 mark_order(u64 marker)
+{
+    u32 total = sched_mark_count();
+    for (u32 index = 0; index < total; index++) {
+        u64 pid = 0;
+        u64 value = 0;
+        if (!sched_mark_get(index, &pid, &value)) {
+            continue;
+        }
+        if (value == marker) {
+            return index + 1;
+        }
+    }
+    return 0;
+}
+
+static u64 mark_pid(u64 marker)
+{
+    u32 total = sched_mark_count();
+    for (u32 index = 0; index < total; index++) {
+        u64 pid = 0;
+        u64 value = 0;
+        if (!sched_mark_get(index, &pid, &value)) {
+            continue;
+        }
+        if (value == marker) {
+            return pid;
+        }
+    }
+    return 0;
+}
+
+static void test_fork_wait(void)
+{
+    sched_mark_reset();
+    u64 image_size = (u64)(user_forktest_end - user_forktest_start);
+    struct process *process = process_create("forktest", 0, user_forktest_start, image_size);
+    check(process != NULL, "fork test program creates a process");
+    if (process == NULL) {
+        return;
+    }
+    u64 pid = process->pid;
+    u32 completed = 0;
+    int result = sched_run_batch(&pid, 1, &completed);
+    check(result == SCHED_ERROR_NONE && completed == 1, "fork and wait program completes");
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 reaped_pid = 0;
+    process_reap_child(0, pid, &reaped_pid, &status);
+    check(reaped_pid == pid && status == 0, "fork parent exits with the success status");
+    u64 parent_pid = mark_pid(0x20);
+    u64 child_pid = mark_pid(0x21);
+    check(parent_pid != 0 && child_pid != 0 && parent_pid != child_pid,
+          "fork child resumes at the parent call point");
+    check(sched_marker_total(0x25) > 0, "fork child runs on a private memory copy");
+    check(sched_marker_total(0x2F) == 0, "fork child never corrupts the parent memory");
+    u32 wait_enter = mark_order(0x23);
+    u32 child_done = mark_order(0x22);
+    u32 wait_return = mark_order(0x24);
+    check(wait_enter != 0 && child_done > wait_enter && wait_return > child_done,
+          "blocking wait resumes only after the child exits");
+    check(process_count() == 0, "fork tree is fully reaped");
+}
+
+static void test_graphics(void)
+{
+    check(fb_init() == 0, "framebuffer driver detects a pci vga device");
+    check(fb_device_found() && fb_pci_address() != 0, "framebuffer pci bar address is valid");
+    u32 saved[4];
+    u32 written[4];
+    u32 readback[4];
+    written[0] = 0x11223344U;
+    written[1] = 0x55667788U;
+    written[2] = 0x99AABBCCU;
+    written[3] = 0xDDEEFF11U;
+    memset(saved, 0, sizeof(saved));
+    memset(readback, 0, sizeof(readback));
+    bool vram_ok = false;
+    if (fb_read_test_pixels(0x400000, saved, 4) == 0 &&
+        fb_write_test_pixels(0x400000, written, 4) == 0 &&
+        fb_read_test_pixels(0x400000, readback, 4) == 0) {
+        vram_ok = memcmp(readback, written, sizeof(written)) == 0;
+        fb_write_test_pixels(0x400000, saved, 4);
+    }
+    check(vram_ok, "framebuffer vram stores and returns pixel data");
+
+    check(fb_set_mode(800, 600, 32) == 0, "framebuffer driver applies a graphics mode");
+    check(fb_mode_active() && fb_current_mode().width == 800 && fb_current_mode().height == 600,
+          "framebuffer mode dimensions are applied");
+    struct gfx_surface *surface = fb_surface();
+    check(surface != NULL && surface->valid && surface->width == 800, "framebuffer exposes a graphics surface");
+    fb_fill(0, 0, 800, 600, 0x00102030U);
+    fb_fill(64, 64, 96, 64, 0x0000FF00U);
+    check(fb_pixel(0, 0) == 0x00102030U && fb_pixel(96, 96) == 0x0000FF00U,
+          "framebuffer pixel fill and readback agree");
+    check(gfx_count_color(surface, 0, 0, 800, 600, 0x0000FF00U) == 96 * 64,
+          "gfx surface fills a rectangle exactly");
+    gfx_fill_rect(surface, -16, -16, 32, 32, 0x00112233U);
+    check(gfx_get_pixel(surface, 0, 0) == 0x00112233U &&
+          gfx_count_color(surface, 0, 0, 16, 16, 0x00112233U) == 256,
+          "gfx surface clips drawing to surface bounds");
+    check(gfx_checksum(surface, 0, 0, 32, 32) != 0, "gfx surface checksum covers drawn pixels");
+
+    static u32 window_pixels[64 * 64];
+    struct gfx_surface target;
+    gfx_init_surface(&target, window_pixels, 64, 64, 64, GFX_FORMAT_RGB32);
+    gfx_clear(&target, 0);
+    wm_init();
+    struct wm_window *lower = wm_create(2, 2, 20, 16, 0x0000AA00U);
+    check(lower != NULL && wm_count() == 1, "wm creates a window");
+    if (lower != NULL) {
+        wm_fill(lower->id, 0, 0, 20, 16, 0x00FF0000U);
+    }
+    struct wm_window *upper = wm_create(10, 8, 20, 16, 0x000000FFU);
+    check(upper != NULL && wm_count() == 2, "wm creates a second window");
+    if (upper != NULL) {
+        wm_fill(upper->id, 0, 0, 20, 16, 0x000000FFU);
+    }
+    check(wm_draw_to(&target) == 0, "wm composites windows into a surface");
+    check(gfx_get_pixel(&target, 3, 3) == 0x00FF0000U, "wm draws the first window");
+    check(gfx_get_pixel(&target, 11, 9) == 0x000000FFU, "wm draws overlapping windows in z order");
+    if (lower != NULL) {
+        check(wm_zorder_at(0) == lower->id && wm_find(lower->id) == lower, "wm tracks window z order");
+        check(wm_destroy(lower->id) == 0 && wm_count() == 1, "wm destroys a window");
+        gfx_clear(&target, 0);
+        wm_draw_to(&target);
+        check(gfx_get_pixel(&target, 3, 3) == 0 &&
+              gfx_get_pixel(&target, 11, 9) == 0x000000FFU,
+              "wm excludes destroyed windows from composition");
+    }
+    if (upper != NULL) {
+        wm_destroy(upper->id);
+    }
+    check(wm_count() == 0, "wm window table drains");
+
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_program("guitest", user_guitest_start, user_guitest_end, &status);
+    check(pid != 0 && status == 0, "user graphics program draws and exits cleanly");
+    check(fb_pixel(36, 36) == 0x00FF0000U && fb_pixel(204, 68) == 0x0000FF00U &&
+          fb_pixel(364, 100) == 0x000000FFU,
+          "user graphics output is present in the framebuffer");
+    fb_restore_text();
+    console_clear();
+    check(!fb_mode_active(), "framebuffer restores text mode after graphics use");
+    check(process_count() == 0, "graphics process is reaped");
+}
+
+void selftest_thread(void *argument)
+{
     (void)argument;
     kprintf("ZTEST BEGIN\n");
     test_memory();
@@ -372,8 +578,11 @@ void selftest_thread(void *argument) {
     test_threads();
     test_elf();
     test_user_mode();
-    test_processes();
+    test_address_spaces();
+    test_preemption();
+    test_fork_wait();
     test_display();
+    test_graphics();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

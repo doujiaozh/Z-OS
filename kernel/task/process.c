@@ -1,23 +1,23 @@
 #include "process.h"
 #include "elf.h"
+#include "gdt.h"
 #include "heap.h"
+#include "interrupts.h"
 #include "io.h"
 #include "lib.h"
 #include "pmm.h"
 #include "string.h"
-#include "thread.h"
 #include "timer.h"
-#include "user.h"
 #include "vmm.h"
 
 static struct process process_table[MAX_PROCESSES];
 static struct process *ready_head = NULL;
 static struct process *ready_tail = NULL;
+static struct process *current_process = NULL;
 static u64 next_process_pid = 1;
-static u64 current_process_pid = 0;
 static u32 ready_count = 0;
 
-static struct process *process_allocate_locked(const char *name, u64 parent_pid) {
+static struct process *allocate_process(const char *name, u64 parent_pid) {
     for (u32 index = 0; index < MAX_PROCESSES; index++) {
         if (!process_table[index].used) {
             memset(&process_table[index], 0, sizeof(struct process));
@@ -26,6 +26,7 @@ static struct process *process_allocate_locked(const char *name, u64 parent_pid)
             process_table[index].parent_pid = parent_pid;
             process_table[index].state = PROCESS_UNUSED;
             process_table[index].created_ticks = timer_ticks();
+            process_table[index].quantum = PROCESS_QUANTUM_TICKS;
             strncpy(process_table[index].name, name, sizeof(process_table[index].name) - 1);
             process_table[index].name[sizeof(process_table[index].name) - 1] = 0;
             return &process_table[index];
@@ -34,14 +35,28 @@ static struct process *process_allocate_locked(const char *name, u64 parent_pid)
     return NULL;
 }
 
-static void process_release(struct process *process) {
+static void release_process(struct process *process) {
     if (process == NULL) {
         return;
+    }
+    if (process->kernel_stack_base != 0) {
+        kfree((void *)(usize)process->kernel_stack_base);
+        process->kernel_stack_base = 0;
     }
     memset(process, 0, sizeof(struct process));
 }
 
-static void ready_enqueue_locked(struct process *process) {
+static void drain_ready_queue(void) {
+    ready_head = NULL;
+    ready_tail = NULL;
+    ready_count = 0;
+}
+
+void process_enqueue_ready(struct process *process) {
+    if (process == NULL || process->state == PROCESS_READY) {
+        return;
+    }
+    u64 flags = irq_save();
     process->ready_next = NULL;
     process->state = PROCESS_READY;
     if (ready_tail == NULL) {
@@ -52,32 +67,53 @@ static void ready_enqueue_locked(struct process *process) {
         ready_tail = process;
     }
     ready_count++;
+    irq_restore(flags);
 }
 
-static void ready_remove_locked(struct process *process) {
+void process_dequeue_ready(struct process *process) {
+    if (process == NULL) {
+        return;
+    }
+    u64 flags = irq_save();
     struct process **cursor = &ready_head;
     while (*cursor != NULL) {
         if (*cursor == process) {
             *cursor = process->ready_next;
             if (ready_tail == process) {
-                ready_tail = NULL;
-                struct process *tail_cursor = ready_head;
-                while (tail_cursor != NULL && tail_cursor->ready_next != NULL) {
-                    tail_cursor = tail_cursor->ready_next;
+                ready_tail = ready_head;
+                while (ready_tail != NULL && ready_tail->ready_next != NULL) {
+                    ready_tail = ready_tail->ready_next;
                 }
-                ready_tail = tail_cursor;
             }
             process->ready_next = NULL;
             if (ready_count > 0) {
                 ready_count--;
             }
-            return;
+            break;
         }
         cursor = &(*cursor)->ready_next;
     }
+    irq_restore(flags);
 }
 
-static int process_load_stack(struct process *process) {
+struct process *process_pick_ready(void) {
+    u64 flags = irq_save();
+    struct process *process = ready_head;
+    if (process != NULL) {
+        ready_head = process->ready_next;
+        if (ready_head == NULL) {
+            ready_tail = NULL;
+        }
+        process->ready_next = NULL;
+        if (ready_count > 0) {
+            ready_count--;
+        }
+    }
+    irq_restore(flags);
+    return process;
+}
+
+static int process_load_user_stack(struct process *process) {
     u64 stack_frame = pmm_alloc_frame();
     if (stack_frame == 0) {
         return PROCESS_ERROR_MEMORY;
@@ -91,14 +127,37 @@ static int process_load_stack(struct process *process) {
     return PROCESS_ERROR_NONE;
 }
 
+static int process_allocate_kernel_stack(struct process *process) {
+    process->kernel_stack_base = (u64)kmalloc(PROCESS_KERNEL_STACK_SIZE);
+    if (process->kernel_stack_base == 0) {
+        return PROCESS_ERROR_MEMORY;
+    }
+    memset((void *)(usize)process->kernel_stack_base, 0, PROCESS_KERNEL_STACK_SIZE);
+    process->kernel_stack_top = (process->kernel_stack_base + PROCESS_KERNEL_STACK_SIZE) & ~0xFULL;
+    return PROCESS_ERROR_NONE;
+}
+
+static struct registers *process_frame_slot(struct process *process) {
+    return (struct registers *)(process->kernel_stack_top - sizeof(struct registers));
+}
+
+static void process_reset_frame(struct registers *frame, u64 entry, u64 user_stack) {
+    memset(frame, 0, sizeof(struct registers));
+    frame->rip = entry;
+    frame->cs = GDT_USER_CODE | 3;
+    frame->rflags = 0x202;
+    frame->rsp = user_stack;
+    frame->ss = GDT_USER_DATA | 3;
+    frame->rax = 0;
+}
+
 void process_init(void) {
     memset(process_table, 0, sizeof(process_table));
-    ready_head = NULL;
-    ready_tail = NULL;
+    drain_ready_queue();
+    current_process = NULL;
     next_process_pid = 1;
-    current_process_pid = 0;
-    ready_count = 0;
-    kprintf("Process: table ready for %u processes\n", MAX_PROCESSES);
+    kprintf("Process: %u slots, kernel stack %u KiB, quantum %u ticks\n",
+            MAX_PROCESSES, PROCESS_KERNEL_STACK_SIZE / 1024, PROCESS_QUANTUM_TICKS);
 }
 
 struct process *process_find(u64 pid) {
@@ -113,78 +172,90 @@ struct process *process_find(u64 pid) {
     return NULL;
 }
 
+struct process *process_current(void) {
+    return current_process;
+}
+
+void process_set_current(struct process *process) {
+    current_process = process;
+}
+
 struct process *process_create(const char *name, u64 parent_pid, const void *image, u64 image_size) {
     if (image == NULL || image_size == 0) {
         return NULL;
     }
     u64 flags = irq_save();
-    struct process *process = process_allocate_locked(name, parent_pid);
+    struct process *process = allocate_process(name, parent_pid);
     irq_restore(flags);
     if (process == NULL) {
         return NULL;
     }
     if (vmm_create_address_space(&process->space) != 0) {
-        u64 release_flags = irq_save();
-        process_release(process);
-        irq_restore(release_flags);
+        release_process(process);
         return NULL;
     }
     u64 entry = 0;
     if (elf_load_into(&process->space, image, image_size, &entry) != ELF_OK) {
         vmm_destroy_address_space(&process->space);
-        u64 release_flags = irq_save();
-        process_release(process);
-        irq_restore(release_flags);
+        release_process(process);
         return NULL;
     }
-    if (process_load_stack(process) != PROCESS_ERROR_NONE) {
+    if (process_load_user_stack(process) != PROCESS_ERROR_NONE) {
         vmm_destroy_address_space(&process->space);
-        u64 release_flags = irq_save();
-        process_release(process);
-        irq_restore(release_flags);
+        release_process(process);
+        return NULL;
+    }
+    if (process_allocate_kernel_stack(process) != PROCESS_ERROR_NONE) {
+        vmm_destroy_address_space(&process->space);
+        release_process(process);
         return NULL;
     }
     process->entry = entry;
-    process->state = PROCESS_READY;
-    u64 enqueue_flags = irq_save();
-    ready_enqueue_locked(process);
-    irq_restore(enqueue_flags);
+    process_reset_frame(process_frame_slot(process), entry, process->user_stack_top);
+    process->frame_rsp = process->kernel_stack_top - sizeof(struct registers);
+    process->quantum = PROCESS_QUANTUM_TICKS;
+    process_enqueue_ready(process);
     return process;
 }
 
-int process_fork(u64 parent_pid, u64 *child_pid) {
+int process_fork_frame(u64 parent_pid, const struct registers *frame, u64 *child_pid) {
     struct process *parent = process_find(parent_pid);
-    if (parent == NULL || parent->state == PROCESS_UNUSED || child_pid == NULL) {
+    if (parent == NULL || frame == NULL || child_pid == NULL) {
         return PROCESS_ERROR_INVALID;
     }
-    u64 flags = irq_save();
     char child_name[24];
     strncpy(child_name, parent->name, sizeof(child_name) - 1);
     child_name[sizeof(child_name) - 1] = 0;
-    struct process *child = process_allocate_locked(child_name, parent_pid);
+    u64 flags = irq_save();
+    struct process *child = allocate_process(child_name, parent_pid);
     irq_restore(flags);
     if (child == NULL) {
         return PROCESS_ERROR_NO_SPACE;
     }
     if (vmm_clone_address_space(&parent->space, &child->space) != 0) {
-        u64 release_flags = irq_save();
-        process_release(child);
-        irq_restore(release_flags);
+        release_process(child);
+        return PROCESS_ERROR_MEMORY;
+    }
+    if (process_allocate_kernel_stack(child) != PROCESS_ERROR_NONE) {
+        vmm_destroy_address_space(&child->space);
+        release_process(child);
         return PROCESS_ERROR_MEMORY;
     }
     child->entry = parent->entry;
     child->user_stack_top = parent->user_stack_top;
-    child->state = PROCESS_READY;
-    u64 enqueue_flags = irq_save();
-    ready_enqueue_locked(child);
-    irq_restore(enqueue_flags);
+    struct registers *child_frame = process_frame_slot(child);
+    memcpy(child_frame, frame, sizeof(struct registers));
+    child_frame->rax = 0;
+    child->frame_rsp = child->kernel_stack_top - sizeof(struct registers);
+    child->quantum = PROCESS_QUANTUM_TICKS;
+    process_enqueue_ready(child);
     *child_pid = child->pid;
     return PROCESS_ERROR_NONE;
 }
 
-int process_exec(u64 pid, const void *image, u64 image_size) {
-    struct process *process = process_find(pid);
-    if (process == NULL || process->state == PROCESS_RUNNING || image == NULL) {
+int process_exec_current(const void *image, u64 image_size, struct registers *frame) {
+    struct process *process = current_process;
+    if (process == NULL || image == NULL || frame == NULL) {
         return PROCESS_ERROR_INVALID;
     }
     struct address_space replacement;
@@ -207,151 +278,127 @@ int process_exec(u64 pid, const void *image, u64 image_size) {
         vmm_destroy_address_space(&replacement);
         return PROCESS_ERROR_MEMORY;
     }
-    vmm_destroy_address_space(&process->space);
+    struct address_space previous = process->space;
+    if (vmm_switch_address_space(&replacement) != 0) {
+        vmm_destroy_address_space(&replacement);
+        return PROCESS_ERROR_MEMORY;
+    }
     process->space = replacement;
     process->entry = entry;
     process->user_stack_top = PROCESS_STACK_TOP;
-    return PROCESS_ERROR_NONE;
-}
-
-int process_exec_current(const void *image, u64 image_size, u64 *entry, u64 *stack) {
-    struct process *process = process_find(current_process_pid);
-    if (process == NULL || process->state != PROCESS_RUNNING || image == NULL ||
-        entry == NULL || stack == NULL) {
-        return PROCESS_ERROR_INVALID;
-    }
-    struct address_space replacement;
-    if (vmm_create_address_space(&replacement) != 0) {
-        return PROCESS_ERROR_MEMORY;
-    }
-    u64 new_entry = 0;
-    if (elf_load_into(&replacement, image, image_size, &new_entry) != ELF_OK) {
-        vmm_destroy_address_space(&replacement);
-        return PROCESS_ERROR_MEMORY;
-    }
-    u64 stack_frame = pmm_alloc_frame();
-    if (stack_frame == 0) {
-        vmm_destroy_address_space(&replacement);
-        return PROCESS_ERROR_MEMORY;
-    }
-    if (vmm_map_user_page(&replacement, VMM_USER_STACK_BASE, stack_frame,
-                          PTE_PRESENT | PTE_WRITABLE | PTE_USER) != 0) {
-        pmm_free_frame(stack_frame);
-        vmm_destroy_address_space(&replacement);
-        return PROCESS_ERROR_MEMORY;
-    }
-    struct address_space previous = process->space;
-    u64 previous_entry = process->entry;
-    u64 previous_stack = process->user_stack_top;
-    process->space = replacement;
-    process->entry = new_entry;
-    process->user_stack_top = PROCESS_STACK_TOP;
-    if (vmm_switch_address_space(&process->space) != 0) {
-        process->space = previous;
-        process->entry = previous_entry;
-        process->user_stack_top = previous_stack;
-        vmm_destroy_address_space(&replacement);
-        return PROCESS_ERROR_MEMORY;
-    }
     vmm_destroy_address_space(&previous);
-    *entry = new_entry;
-    *stack = PROCESS_STACK_TOP;
+    process_reset_frame(frame, entry, process->user_stack_top);
     return PROCESS_ERROR_NONE;
 }
 
-int process_exit(u64 pid, u64 status) {
-    struct process *process = process_find(pid);
-    if (process == NULL || process->state == PROCESS_UNUSED) {
-        return PROCESS_ERROR_INVALID;
+void process_mark_zombie(struct process *process, u64 status) {
+    if (process == NULL || process->state == PROCESS_ZOMBIE) {
+        return;
     }
-    if (process->state == PROCESS_RUNNING) {
-        return PROCESS_ERROR_BUSY;
-    }
-    u64 flags = irq_save();
     if (process->state == PROCESS_READY) {
-        ready_remove_locked(process);
+        process_dequeue_ready(process);
     }
     process->state = PROCESS_ZOMBIE;
     process->exit_status = status;
     process->exited_ticks = timer_ticks();
-    irq_restore(flags);
-    return PROCESS_ERROR_NONE;
 }
 
-int process_wait(u64 parent_pid, u64 child_pid, u64 *status) {
-    struct process *child = NULL;
+void process_wake_parent(struct process *child) {
+    if (child == NULL) {
+        return;
+    }
+    struct process *parent = process_find(child->parent_pid);
+    if (parent == NULL || parent->state != PROCESS_BLOCKED) {
+        return;
+    }
+    if (parent->wait_target != 0 && parent->wait_target != child->pid) {
+        return;
+    }
+    parent->wait_target = 0;
+    process_enqueue_ready(parent);
+}
+
+static void reclaim_process(struct process *process) {
+    vmm_destroy_address_space(&process->space);
+    release_process(process);
+}
+
+int process_reap(u64 pid) {
+    struct process *process = process_find(pid);
+    if (process == NULL || process->state != PROCESS_ZOMBIE || process == current_process) {
+        return PROCESS_ERROR_INVALID;
+    }
+    u64 status = process->exit_status;
+    reclaim_process(process);
+    return (int)status;
+}
+
+int process_reap_child(u64 parent_pid, u64 target_pid, u64 *reaped_pid, u64 *status) {
     u64 flags = irq_save();
+    struct process *found = NULL;
+    bool alive_child = false;
     for (u32 index = 0; index < MAX_PROCESSES; index++) {
         struct process *candidate = &process_table[index];
         if (!candidate->used || candidate->parent_pid != parent_pid) {
             continue;
         }
-        if (child_pid != 0 && candidate->pid != child_pid) {
+        if (target_pid != 0 && candidate->pid != target_pid) {
             continue;
         }
         if (candidate->state == PROCESS_ZOMBIE) {
-            child = candidate;
+            found = candidate;
             break;
         }
+        alive_child = true;
     }
-    if (child == NULL) {
+    if (found == NULL) {
         irq_restore(flags);
-        return PROCESS_ERROR_NO_CHILD;
+        return alive_child ? PROCESS_ERROR_NEED_BLOCK : PROCESS_ERROR_NO_CHILD;
     }
-    u64 pid = child->pid;
+    u64 pid = found->pid;
+    u64 exit_status = found->exit_status;
+    reclaim_process(found);
+    irq_restore(flags);
+    if (reaped_pid != NULL) {
+        *reaped_pid = pid;
+    }
     if (status != NULL) {
-        *status = child->exit_status;
+        *status = exit_status;
     }
-    vmm_destroy_address_space(&child->space);
-    process_release(child);
-    irq_restore(flags);
-    return (int)pid;
+    return PROCESS_ERROR_NONE;
 }
 
-struct process *process_take_ready(void) {
+u32 process_reap_zombies(void) {
+    u32 reaped = 0;
     u64 flags = irq_save();
-    struct process *process = ready_head;
-    if (process != NULL) {
-        ready_head = process->ready_next;
-        if (ready_head == NULL) {
-            ready_tail = NULL;
+    for (u32 index = 0; index < MAX_PROCESSES; index++) {
+        struct process *candidate = &process_table[index];
+        if (!candidate->used || candidate->state != PROCESS_ZOMBIE || candidate == current_process) {
+            continue;
         }
-        process->ready_next = NULL;
-        if (ready_count > 0) {
-            ready_count--;
+        struct process *parent = process_find(candidate->parent_pid);
+        if (parent != NULL && parent->state != PROCESS_ZOMBIE && parent != candidate) {
+            continue;
         }
+        reclaim_process(candidate);
+        reaped++;
     }
     irq_restore(flags);
-    return process;
+    return reaped;
 }
 
-int process_run(u64 pid, u64 *exit_code) {
+int process_kill(u64 pid, u64 status) {
     struct process *process = process_find(pid);
-    if (process == NULL || process->state != PROCESS_READY) {
-        return PROCESS_ERROR_NOT_READY;
+    if (process == NULL || process->state == PROCESS_ZOMBIE || process == current_process) {
+        return PROCESS_ERROR_INVALID;
     }
-    u64 flags = irq_save();
-    ready_remove_locked(process);
-    process->state = PROCESS_RUNNING;
-    current_process_pid = process->pid;
-    irq_restore(flags);
-    u64 code = 0;
-    int result = user_run_in_address_space(&process->space, process->entry,
-                                           process->user_stack_top, &code);
-    u64 finish_flags = irq_save();
-    current_process_pid = 0;
-    process->state = PROCESS_ZOMBIE;
-    process->exit_status = code;
-    process->exited_ticks = timer_ticks();
-    irq_restore(finish_flags);
-    if (exit_code != NULL) {
-        *exit_code = code;
-    }
-    return result;
+    process_mark_zombie(process, status);
+    process_wake_parent(process);
+    return PROCESS_ERROR_NONE;
 }
 
 u64 process_current_pid(void) {
-    return current_process_pid;
+    return current_process != NULL ? current_process->pid : 0;
 }
 
 u64 process_count(void) {
@@ -366,6 +413,16 @@ u64 process_count(void) {
 
 u64 process_ready_count(void) {
     return ready_count;
+}
+
+u64 process_blocked_count(void) {
+    u64 count = 0;
+    for (u32 index = 0; index < MAX_PROCESSES; index++) {
+        if (process_table[index].used && process_table[index].state == PROCESS_BLOCKED) {
+            count++;
+        }
+    }
+    return count;
 }
 
 u64 process_high_half_entry(const struct process *process) {
@@ -383,10 +440,28 @@ u64 process_user_physical(const struct process *process, u64 virtual_address) {
     return vmm_user_physical(&process->space, virtual_address);
 }
 
-int process_switch_space(struct process *process) {
-    if (process == NULL) {
-        vmm_switch_kernel();
-        return PROCESS_ERROR_NONE;
+u32 process_snapshot(struct process *buffer, u32 capacity) {
+    u32 written = 0;
+    for (u32 index = 0; index < MAX_PROCESSES && written < capacity; index++) {
+        if (!process_table[index].used) {
+            continue;
+        }
+        buffer[written++] = process_table[index];
     }
-    return vmm_switch_address_space(&process->space);
+    return written;
+}
+
+const char *process_state_name(enum process_state state) {
+    switch (state) {
+        case PROCESS_READY:
+            return "ready";
+        case PROCESS_RUNNING:
+            return "running";
+        case PROCESS_BLOCKED:
+            return "blocked";
+        case PROCESS_ZOMBIE:
+            return "zombie";
+        default:
+            return "unused";
+    }
 }

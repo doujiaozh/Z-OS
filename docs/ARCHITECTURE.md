@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.3.0 implementation as it exists in this
+This document describes the Z-OS 0.4.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.3.0:
+Non-goals for 0.4.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -134,6 +134,7 @@ BSS. It never allocates a frame above the boot identity map.
 | 0x0000000050000000 | Self-test scratch mapping |
 | 0x0000000060000000 to 0x00000000607FFFFF | 8 MiB kernel heap |
 | 0x0000000070000000 | Self-test scratch mapping |
+| 0xFFFFFFFF40000000 to 0xFFFFFFFF7FFFFFFF | Shared supervisor device window (framebuffer) |
 | 0xFFFFFFFF80000000 to 0xFFFFFFFFBFFFFFFF | Shared kernel high-half direct map |
 
 The initial page tables map 1 GiB with 2 MiB pages. `vmm_map_page` splits a
@@ -153,7 +154,10 @@ Each process PML4 has three top-level regions:
 - The private user page directory holds ELF pages and the user stack with the
   user bit set. Entries 256 through 259 are copied from the boot address space
   to share the supervisor-only 8 MiB kernel heap mapping.
-- PML4[511] points to a shared high-half PDPT and a shared 1 GiB direct map.
+- PML4[511] points to a shared high-half PDPT. PDPT entry 510 maps a shared
+  1 GiB direct map of physical memory 0 to 1 GiB. PDPT entry 509 maps a shared
+  supervisor-only device window used for framebuffer and other memory mapped
+  device apertures. Both are identical in every address space.
 
 ## Physical memory manager
 
@@ -224,10 +228,12 @@ kernel image through the high alias.
   a timer handler cannot hold off further interrupts.
 
 `interrupt_dispatch` routes timer, keyboard, and serial interrupts. The timer
-increments the tick counter, wakes sleeping threads, accounts CPU time, and
-may context switch.
+increments the tick counter, charges the active process quantum, wakes
+sleeping kernel threads, accounts CPU time, and may context switch kernel
+threads. After dispatch, the stub calls `sched_interrupt_return`, which may
+switch to another user-process interrupt frame before `iretq`.
 
-## Scheduler
+## Kernel thread scheduler
 
 - Up to 32 thread slots.
 - Thread 0 is the boot/init thread with a 64 KiB static stack.
@@ -242,21 +248,68 @@ may context switch.
   thread reaps zombie stacks in its idle loop.
 - `sched_sleep_ms` puts a thread to sleep until a tick deadline. The timer
   interrupt wakes it.
-- A preemption-disable depth protects console output and synchronous
-  user-process execution from scheduler switches. Interrupts remain enabled
-  so the serial FIFO can drain.
-- `tss_set_rsp0` is updated on context switches. The synchronous process
-  runner also points TSS.RSP0 at its dedicated interrupt stack.
+- The thread scheduler yields completely while a user-process batch is active.
+- A preemption-disable depth protects console output.
 
 There is no SMP scheduler, no priority scheduling, no CPU affinity, and no
 work stealing. The design is deliberately uniprocessor.
+
+## Preemptive user-process scheduler
+
+`kernel/task/sched.c` runs Ring 3 processes with time-slice round-robin
+preemption on top of the uniprocessor kernel.
+
+Per-process state used by the scheduler:
+
+| Field | Purpose |
+| --- | --- |
+| `kernel_stack_base` | 16 KiB heap stack, shared supervisor mapping |
+| `kernel_stack_top` | Initial TSS.RSP0 for the process |
+| `frame_rsp` | Saved pointer to the 176-byte interrupt frame |
+| `quantum` | Ticks left in the current slice |
+| `context_switches` | Forced switch counter |
+| `cpu_ticks` | Timer ticks charged to the process |
+
+Context switch mechanics:
+
+1. An interrupt or `int 0x80` from Ring 3 switches the CPU stack to
+   `TSS.RSP0`, which points at the current process kernel stack.
+2. The stub pushes error code, vector, and the 15 general registers. The
+   resulting frame layout matches `struct registers` and ends with the Ring 3
+   `rip`, `cs`, `rflags`, `rsp`, and `ss` pushed by the CPU.
+3. After C dispatch, the stub calls `sched_interrupt_return(frame_rsp)`.
+4. If a batch is active, the frame came from Ring 3, and the process is
+   blocked or its quantum expired, the scheduler saves `frame_rsp`, updates
+   state and ready queue, writes CR3 for the next process, updates
+   `TSS.RSP0`, and returns the next frame pointer.
+5. The stub moves `rsp` to that pointer and falls through to `iretq`, which
+   resumes the next process exactly where it was interrupted.
+
+`kernel/arch/sched.asm` contains the three assembly entry points:
+`sched_enter_user` (save the kernel batch context and resume a process frame),
+`sched_resume_user_frame` (resume without saving, used by exit), and
+`sched_abandon_to_dispatcher` (return to the batch driver kernel context).
+
+Batch execution:
+
+- A kernel thread calls `sched_run_batch(pids, count, &completed)`.
+- The driver validates that every target process is ready, disables
+  interrupts, and enters the first process.
+- Whenever no ready process remains, control returns to the driver, which
+  either enters the next ready process or ends the batch.
+- The batch ends with `SCHED_ERROR_NONE` when no batch member is blocked.
+  A blocked member with no runnable process is reported as
+  `SCHED_ERROR_DEADLOCK` and remaining members are terminated.
+- Kernel-thread scheduling is suspended for the duration of the batch, so user
+  processes own the CPU.
 
 ## Processes and address spaces
 
 `kernel/task/process.c` implements a process table of 32 control blocks.
 Each process has a PID, parent PID, state, name, private address space, ELF
-entry, user stack, exit status, and ready-queue link. PID zero represents the
-kernel. The ready queue is a FIFO of ready process objects.
+entry, user stack, kernel stack, saved interrupt frame, quantum, CPU ticks,
+context switches, wait target, and exit status. PID zero represents the
+kernel. The ready queue is FIFO, which yields round-robin scheduling.
 
 Process creation:
 
@@ -264,44 +317,52 @@ Process creation:
 2. Create a private PML4 address space with shared kernel mappings.
 3. Validate and load the embedded ELF64 image into that address space.
 4. Map a private user stack page.
-5. Mark the PCB ready and append it to the ready queue.
+5. Allocate a 16 KiB kernel stack and synthesize an interrupt frame at its
+   top with `rip = e_entry`, `rsp = user stack top`, `cs = 0x1B`,
+   `ss = 0x23`, `rflags = 0x202`.
+6. Mark the PCB ready and append it to the ready queue.
 
-`process_run` removes a ready process from the queue, sets the current process
-PID, switches CR3 to its PML4, and enters Ring 3 through the shared TSS
-interrupt stack. The scheduler is disabled during this synchronous run. On
-system-call exit or user exception, the kernel restores the pre-run CR3 and
-marks the process zombie with its exit status.
+Fork:
 
-Address-space objects support create, switch, clone, map, unmap, validate, and
-destroy. Cloning deep-copies every present user page into new physical frames
-and page tables. Kernel low memory, the kernel heap, and the high-half direct
-map remain shared supervisor mappings.
+1. Allocate a child PCB.
+2. Deep-clone the parent address space into new physical frames.
+3. Allocate a child kernel stack and copy the parent current interrupt frame.
+4. Set the child frame `rax = 0` so `fork` returns zero in the child.
+5. Queue the child ready.
 
-Process-manager operations:
+The copied frame keeps the same `rip` and `rsp` as the parent, so the child
+resumes at the instruction after the parent `int 0x80` with an identical user
+stack and cloned memory.
 
-- `process_fork` allocates a child PCB and deep-clones the parent address
-  space. The child is queued ready.
-- `process_exec` creates a new address space, reloads the embedded image, and
-  destroys the old address space for a non-running process.
-- `process_exec_current` can replace the active synchronous process image and
-  switch CR3 from the syscall path.
-- `process_exit` records a zombie status and removes a ready process from the
-  queue.
-- `process_wait` reaps a zombie child, returns its status, and frees its
-  address space and PCB.
+Wait:
+
+1. `process_reap_child` scans for a zombie child matching the target PID.
+2. If a zombie exists, it frees the child address space and PCB and returns
+   the exit status.
+3. If only live children exist, the caller marks the process blocked, records
+   the wait target, and rewinds `rip` by the 2-byte `int 0x80` instruction.
+4. When a child exits, `process_wake_parent` moves a blocked parent back to the
+   ready queue.
+5. The parent resumes and re-executes `int 0x80`; the second attempt reaps the
+   now-zombie child, writes the status to the user pointer, and returns the
+   child PID.
+
+Exit:
+
+- `sched_exit_current` marks the process zombie with its status, wakes a
+  blocked parent, then switches to the next ready process or abandons to the
+  batch driver. The kernel stack and address space are freed when the zombie is
+  reaped, never while still in use.
 
 Important limits:
 
-- User processes are executed one at a time by the shell or tests. The ready
-  queue is not yet consumed by the kernel-thread scheduler.
-- `fork` in this milestone creates an independent ready child from the parent
-  image; it does not resume the child at the parent's saved instruction after
-  the fork system call.
-- `wait` is nonblocking for syscall use: it reaps zombies and returns an error
-  if no child has exited.
+- One CPU, one batch at a time, up to eight processes per batch.
+- Ready-queue round robin only; no priorities, affinity, or real-time classes.
+- No demand paging, copy-on-write, or swapping; `fork` eagerly copies pages.
+- No signals, credentials, sessions, or file-descriptor table.
 - `exec` has no path lookup and reloads only the embedded ELF image.
-- There are no credentials, file-descriptor tables, signals, or per-process
-  kernel stacks.
+- Kernel threads and user processes use different schedulers. There is no
+  unified task model yet.
 
 ## VFS and ramfs
 
@@ -325,12 +386,12 @@ backing store, or fine-grained locking.
 
 ## User mode and ELF64 loading
 
-The user program is `user/init.c`, a freestanding C program with no hosted
-library. The build compiles it with Clang, links it at 0x40000000 with
-`user/user.ld`, and embeds the complete static ELF64 image in the kernel's
-rodata through `user/program.asm`.
+Four freestanding C programs live in `user/`: `init.c`, `multi.c`,
+`forktest.c`, and `guitest.c`. The build compiles each with Clang, links each
+at 0x40000000 with `user/user.ld`, and embeds all four static ELF64 images in
+kernel rodata through `user/program.asm`.
 
-The linker emits two PT_LOAD segments:
+Each image has two PT_LOAD segments:
 
 | Segment | Flags | Virtual range | Contents |
 | --- | --- | --- | --- |
@@ -361,29 +422,21 @@ The user stack is a separate writable page at 0x40010000. Initial RSP is
 0x40010FF8 so the stack pointer satisfies the x86_64 ABI alignment at a C
 function entry.
 
-The shell `usertest` command creates a process, loads the embedded ELF into
-its private address space, switches CR3, enters Ring 3, reaps the zombie, and
-restores the boot address space. The original `user_run_demo` path remains in
-the kernel for the historical Ring 3 regression test but is not the shell
-process path.
+Entering Ring 3:
 
-Transition sequence:
-
-1. Create and validate a process address space and ELF image.
-2. Map the user stack page and all ELF PT_LOAD segments in that address space.
-3. Disable scheduler preemption for the synchronous run.
-4. Point TSS.RSP0 at a dedicated 16 KiB interrupt stack.
-5. Switch CR3 to the process PML4.
-6. Load user data selectors and execute `IRETQ` with user CS, SS, RFLAGS.IF,
-   the ELF entry point, and the user stack.
-7. `INT 0x80` enters the kernel through the DPL-3 gate. The CPU switches to
-   TSS.RSP0 and the common stub builds a register frame.
-8. The syscall dispatcher validates user pointers using the process address
-   space and performs the operation.
-9. `exit` abandons the interrupt frame and restores the pre-demo kernel stack
-   through an assembly return path.
-10. The kernel restores the previous CR3, TSS.RSP0, and preemption state and
-    marks the process zombie.
+1. `sched_run_batch` calls `sched_enter_user`, which saves the batch kernel
+   context and loads the process saved frame pointer.
+2. The epilogue sets `ds` and `es` to the user data selector, restores all
+   general registers, skips the error code and vector, and executes `iretq`.
+3. Ring 3 runs with the process CR3, its own user pages, and interrupts
+   enabled by the saved `rflags`.
+4. `int 0x80` traps through the DPL-3 gate. The CPU switches to
+   `TSS.RSP0` and the common stub builds the register frame on the process
+   kernel stack.
+5. The syscall dispatcher validates user pointers against the process address
+   space and performs the operation, or blocks the process and rewinds `rip`.
+6. `exit` marks the process zombie and resumes another process or the batch
+   driver.
 
 Syscall ABI:
 
@@ -394,39 +447,63 @@ Syscall ABI:
 | 3 | getpid | none | current process PID |
 | 4 | uptime | none | milliseconds since boot |
 | 5 | yield | none | 0 |
-| 6 | fork | none | child PID or -1 |
+| 6 | fork | none | child PID in parent, 0 in child, -1 on error |
 | 7 | exec | none | replaces current image and resets user state |
 | 8 | wait | RDI=child PID, RSI=status pointer | reaped PID or -1 |
+| 9 | fb_info | RDI=buffer | framebuffer metadata or -1 |
+| 10 | fb_rect | RDI=x, RSI=y, RDX=w, R10=h, R8=color | 0 or -1 |
+| 11 | fb_pixel | RDI=x, RSI=y | packed pixel value or -1 |
+| 12 | mark | RDI=marker id | records a scheduler trace mark |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
-limited to 4096 bytes per call.
+limited to 4096 bytes per call. The 4th, 5th, and 6th arguments use R10, R8,
+and R9 as in the System V calling convention.
 
 Important limitations:
 
-- User processes are not yet scheduled concurrently. Execution is synchronous.
-- `fork` clones a ready process image but does not snapshot the caller's
-  instruction pointer.
-- `wait` does not block.
-- `exec` reloads only the built-in ELF image.
-- The loader supports only static, page-aligned `ET_EXEC` images in a fixed
-  64 KiB window. There is no PIE relocation, dynamic linking, argv, envp, or
+- Static non-PIE images only; no relocation, dynamic linking, argv, envp, or
   auxiliary vector.
-- No file-descriptor table, signals, or user heap.
-- No NX, SMEP, SMAP, KASLR, or ASLR. The loader rejects W+X segments, but
-  writable pages remain executable because NX is not enabled.
+- Fixed user window; no ASLR, stack protector, or user heap.
+- No file-descriptor table, signals, or credentials.
+- No NX, SMEP, SMAP, KASLR, or W^X page-table enforcement. The loader rejects
+  W+X ELF segments, but NX is not enabled so writable pages stay executable.
 
-## Display foundation
+## Graphics stack
 
-`kernel/include/kernel.h` defines `framebuffer`, `display_operations`, and
-`display_device`. The framebuffer object carries physical address, dimensions,
-pitch, pixel format, channel masks, and flags. Display operations provide
-initialization, mode setting, presentation, and shutdown hooks.
+`kernel/gui/fb.c` implements the framebuffer driver:
 
-`kernel/drivers/display.c` implements a locked registry of up to eight display
-devices with registration, removal, name lookup, primary selection, and count.
-No VBE/GOP driver, framebuffer console, compositor, or window manager is
-implemented yet.
+- Scans PCI bus 0 for class code 0x03 and reads BAR0.
+- Detects the Bochs dispi interface through I/O ports 0x1CE and 0x1CF.
+- Sets X resolution, Y resolution, 32 bpp, virtual dimensions, and the LFB
+  enable bit, then reads the registers back to confirm the mode.
+- Maps VRAM through the shared device window with cache-disabled pages, so
+  every process address space can use the same supervisor mapping.
+- Falls back to a heap-backed shadow surface when dispi is unavailable.
+- Supports VRAM write and readback probes outside the visible text area,
+  mode restore, and a text-mode console reset.
+
+`kernel/gui/gfx.c` defines `struct gfx_surface` and primitives: initialize,
+clear, plot, get pixel, clip, fill rectangle, horizontal line, vertical line,
+rectangle frame, blit, FNV checksum, and color counting.
+
+`kernel/gui/wm.c` defines the window-manager abstraction:
+
+- Up to eight windows with heap-backed ARGB surfaces.
+- Window attributes: id, position, size, background, visibility, ownership.
+- Create, destroy, find, enumerate, fill, clear, and z-order tracking.
+- `wm_draw_to` composites every visible window into a target surface in
+  creation order.
+
+The kernel exposes framebuffer access to Ring 3 only through `fb_info`,
+`fb_rect`, and `fb_pixel`. User programs cannot map VRAM, so drawing requests
+are validated and executed by the kernel on behalf of the process.
+
+`kernel/include/kernel.h` and `kernel/drivers/display.c` additionally keep the
+display-device registry introduced in 0.3.0: a locked table of up to eight
+`struct display_device` objects with framebuffer metadata and
+initialize/set-mode/present/shutdown hooks. The registry is independent of the
+PCI framebuffer driver and is covered by its own regression test.
 
 ## Console and shell
 
@@ -473,7 +550,7 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 8. Place the kernel after stage 2 in a zeroed 1.44 MiB image.
 9. Write sizes and SHA-256 hashes to `build/manifest.json`.
 
-The compiler include path adds `kernel/mm` and `kernel/task` for the
+The compiler include path adds `kernel/mm`, `kernel/task`, and `kernel/gui` for the
 address-space and process interfaces. New C files are discovered recursively
 by the build script.
 
@@ -484,8 +561,9 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
 
 - Malformed BootInfo leads to a panic, not recovery.
 - Kernel page faults, invalid opcodes, double faults, and stack faults halt.
-- User exceptions terminate the current synchronous process with an error
-  status; the shell reaps it. There is no separate fault-recovery supervisor.
+- User exceptions terminate the current process with an error status; the
+  batch driver reports it and the caller reaps the zombie. There is no
+  separate fault-recovery supervisor.
 - The VFS and heap are protected by global locks. Contention and scalability
   are not modeled.
 - There is no disk, so ramfs contents vanish on restart.
@@ -493,5 +571,5 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
   compatibility, floppy geometry support, and chipset-specific power control.
 - The kernel assumes exactly one CPU and does not program the local APIC.
 
-These boundaries are intentional for a 0.3.0 foundation and are tracked in
+These boundaries are intentional for a 0.4.0 foundation and are tracked in
 the roadmap.

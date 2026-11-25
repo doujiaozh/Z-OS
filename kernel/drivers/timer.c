@@ -2,6 +2,7 @@
 #include "io.h"
 #include "pic.h"
 #include "thread.h"
+#include "sched.h"
 
 static volatile u64 ticks = 0;
 static u32 configured_frequency = TIMER_FREQUENCY;
@@ -30,5 +31,6 @@ u64 timer_uptime_ms(void) {
 
 void timer_irq_handler(void) {
     ticks++;
+    sched_user_tick();
     sched_tick();
 }

@@ -36,6 +36,9 @@ jobs:
             build/z-os-test.img
             build/z-os.elf
             build/user_init.elf
+            build/user_multi.elf
+            build/user_forktest.elf
+            build/user_guitest.elf
             build/manifest.json
             build/selftest.log
             build/smoke.log

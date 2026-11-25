@@ -3,10 +3,11 @@
 Z-OS is a from-scratch, 64-bit operating system for the x86_64 PC platform.
 It boots on BIOS through a two-stage loader into a freestanding C kernel and
 provides a small but real protected-mode environment: preemptive kernel
-threads, per-process address spaces, a shared kernel high-half mapping, a
-kernel heap, a virtual filesystem backed by ramfs, a ring-3 user program with
-syscalls, an interactive shell, a display-device abstraction, and automated
-boot-time self-tests.
+threads, a preemptive user-process scheduler with per-process address spaces,
+a shared kernel high-half mapping, a kernel heap, a virtual filesystem backed
+by ramfs, ring-3 ELF64 processes with a syscall interface, a framebuffer
+graphics stack with a window-manager foundation, an interactive shell, and
+automated boot-time self-tests.
 
 This repository is an engineering foundation, not a replacement for Windows,
 Linux, or macOS. It does not claim feature parity with those systems. The
@@ -15,7 +16,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 0.3.0, codename Process. Development quality. Not production ready.
+Version 0.4.0, codename Scheduler. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -24,12 +25,12 @@ Version 0.3.0, codename Process. Development quality. Not production ready.
 | Interrupts | PIC remap, PIT at 100 Hz, PS/2 keyboard, serial RX, RTC |
 | Memory | E820 frame bitmap, 4-level paging, per-process PML4, shared high-half direct map |
 | Processes | PID table, parent links, ready queue, isolated ELF64 address spaces |
-| Scheduling | Preemptive kernel threads; synchronous user-process execution |
+| Scheduling | Preemptive kernel threads and preemptive time-sliced user processes |
 | Filesystem | In-memory VFS and ramfs, 128 nodes, 1 MiB maximum file size |
 | User mode | Ring-3 static ELF64 C process, TSS kernel stack, `int 0x80` syscalls |
-| GUI foundation | Framebuffer structures and display registry, no compositor yet |
+| Graphics | PCI VGA probe, bochs dispi mode set, gfx surfaces, window manager |
 | Shell | Directory and file commands, system information, ELF process launcher |
-| Verification | 73 in-kernel tests, boot smoke test, interactive shell test |
+| Verification | 107 in-kernel tests, boot smoke test, interactive shell test |
 
 Implemented and verified:
 
@@ -49,21 +50,28 @@ Implemented and verified:
 - Static ELF64 loader with header, program-header, bounds, overlap, and W^X validation.
 - ELF64 loading into independent process address spaces.
 - Process table with PIDs, parent relationships, ready queue, exit status, and reaping.
-- Process-manager fork, image replacement, exit, and wait paths.
-- Ring-3 static C program, `int 0x80`, and syscalls `write`, `exit`, `getpid`, `uptime`, `yield`, `fork`, `exec`, and `wait`.
-- Framebuffer and display-device interface plus a tested display registry.
+- Preemptive time-sliced user-process scheduler with per-process kernel stacks.
+- Interrupt-frame context switch on timer expiry and on blocking system calls.
+- True fork continuation: the child resumes at the parent instruction after `int 0x80`.
+- Blocking `wait` with syscall restart, parent wakeup, and child exit status delivery.
+- Ring-3 static C programs and syscalls `write`, `exit`, `getpid`, `uptime`, `yield`, `fork`, `exec`, `wait`, `fb_info`, `fb_rect`, `fb_pixel`, and `mark`.
+- Framebuffer driver: PCI VGA probe, bochs dispi mode set, VRAM mapping, and readback.
+- Graphics context with clipping, rectangle fill, blitting, checksums, and frame drawing.
+- Window manager with create, destroy, z-order composition, and per-window surfaces.
+- User-space graphics program validated against real framebuffer pixels.
 - Shell commands for filesystem work, diagnostics, scheduling, ELF process launch, and power.
 - ACPI PM1a shutdown path for QEMU and compatible chipsets.
 - QEMU self-test image with machine-checkable pass or fail exit status.
 
 ![Z-OS VGA console](docs/console.png)
 
+![Z-OS graphics stack](docs/gui.png)
+
 Not implemented yet:
 
 - SMP, APIC, ACPI table parsing, and per-CPU scheduling.
-- Preemptive user-process scheduling, kernel-thread-backed process contexts, and blocking wait queues.
-- True fork continuation at the same user instruction pointer; the current fork clones a ready process image.
-- Blocking `wait` semantics and POSIX process credentials.
+- POSIX process credentials, sessions, signals, and a file-descriptor table.
+- Demand paging, copy-on-write, swapping, and a user-space heap.
 - Dynamic ELF loading, PIE relocation, shared libraries, and a user-space C library.
 - Persistent disks, block cache, journaling filesystem, permissions, and mount points.
 - Networking, sockets, USB, audio, GPU acceleration, and a graphical compositor.
@@ -104,7 +112,7 @@ Artifacts:
 - `build/z-os.img`: normal boot image
 - `build/z-os-test.img`: kernel self-test image
 - `build/z-os.elf`: kernel ELF with debug symbols
-- `build/user_init.elf`: static ELF64 user program
+- `build/user_init.elf`, `build/user_multi.elf`, `build/user_forktest.elf`, `build/user_guitest.elf`
 - `build/manifest.json`: sizes and SHA-256 hashes
 
 The image is a 1.44 MiB floppy image. The loader is tied to the standard
@@ -150,82 +158,121 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 73 in-kernel checks covering physical memory,
+The self-test image runs 107 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
 ELF64 validation, per-process address spaces, high-half mapping, process
-lifecycle, display registration, and the ring-3 syscall round trip. It then
-exits QEMU through the ISA debug exit device, so the harness can validate a
-machine-readable result rather than a screenshot.
+lifecycle, preemptive time slicing, fork continuation, blocking wait,
+framebuffer VRAM access, gfx primitives, window composition, display
+registration, and the ring-3 syscall round trip. It then exits QEMU through
+the ISA debug exit device, so the harness can validate a machine-readable
+result rather than a screenshot.
 
 The keyboard check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a
 TCP serial backend, runs shell commands, and verifies file creation, reads,
-appends, renames, copies, metadata, hexdumps, memory, scheduling, ELF64
-execution, cleanup, and ACPI shutdown.
+appends, renames, copies, metadata, hexdumps, memory, preemptive process
+scheduling, fork and wait behaviour, framebuffer graphics composition, ACPI
+shutdown, and cleanup.
 
 Verified environment: QEMU 7.0.0 on Windows, 256 MiB RAM, default `pc`
 machine and SeaBIOS. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
-## ELF64 user program
+## ELF64 user programs
 
-`user/init.c` is a freestanding C program compiled with Clang and linked by
-LLD at 0x40000000. It uses only the Z-OS syscall ABI and has no hosted C
-library. The linker produces two PT_LOAD segments: read-execute text and
-read-write data with BSS.
+`user/init.c`, `user/multi.c`, `user/forktest.c`, and `user/guitest.c` are
+freestanding C programs compiled with Clang and linked by LLD at 0x40000000.
+They use only the Z-OS syscall ABI and no hosted C library. Each linker output
+has two PT_LOAD segments: read-execute text and read-write data with BSS. The
+kernel embeds all four ELF64 images in its rodata.
 
-The kernel embeds the complete ELF64 executable in its rodata. On `usertest`,
-the kernel creates a process, creates a private PML4 address space, validates
-the ELF image, copies every PT_LOAD segment into that address space, maps a
-private stack, and enters Ring 3 under the process CR3. The high-half kernel
-mapping and the supervisor-only low identity mapping are shared by all address
-spaces.
+The loader accepts only static `ET_EXEC` images with page-aligned,
+non-overlapping PT_LOAD segments inside 0x40000000 to 0x4000FFFF. It validates
+magic, class, endianness, machine, header sizes, segment bounds, address range,
+page overlap, and rejects write-plus-execute segments. It does not support PIE
+relocation, dynamic linking, argv, or environment strings.
 
-The current loader accepts only static `ET_EXEC` images with page-aligned,
-non-overlapping PT_LOAD segments inside 0x40000000 to 0x4000FFFF. It does not
-support PIE relocation, dynamic linking, argv, or environment strings.
+## Preemptive process scheduler
+
+`kernel/task/sched.c` runs user processes with time-slice round-robin
+preemption.
+
+- Every process owns a 16 KiB kernel stack in the shared supervisor heap.
+- A synthesized interrupt frame at the top of that stack holds the user
+  registers, `rip`, `cs`, `rflags`, `rsp`, and `ss` for 0x1B:0x23 Ring 3.
+- `TSS.RSP0` points at the process kernel stack, so every interrupt or syscall
+  from Ring 3 builds its frame there.
+- The interrupt stub asks `sched_interrupt_return` after dispatch. When the
+  interrupted context was Ring 3 and the quantum expired, the scheduler saves
+  the frame pointer, switches CR3 and `TSS.RSP0`, and returns the next
+  process frame pointer. The stub then resumes that frame with `iretq`.
+- Quantum accounting runs on each 100 Hz timer tick. The default quantum is
+  two ticks.
+- `int 0x80` blocking calls mark the process blocked and rewind the saved
+  `rip` by the 2-byte `int 0x80` instruction. When the process is woken, the
+  instruction re-executes and the system call completes in the process own
+  context and address space.
+- `fork` copies the parent interrupt frame into a new kernel stack with
+  `rax = 0`, so the child resumes at the parent instruction after the `int
+  0x80` with a cloned address space.
+- `exit` marks the process zombie, wakes a blocked parent, and switches to
+  another ready process or returns control to the batch driver.
+- A batch driver (`sched_run_batch`) is called from a kernel thread such as the
+  shell. It enters user mode through an assembly helper, resumes on demand when
+  no ready process remains, and reports the number of completed processes.
+  Kernel-thread scheduling is suspended while a batch is active.
 
 ```text
-User: entering ring 3 in process address space 0x93e000
-Hello from Z-OS ring 3
-User syscall return path verified
-C ELF64 user program checksum verified
-ELF64 BSS zero check verified
-user program exited with status 0
+schedtest: quantum=2 ticks completed=2 preemptions=...
+schedtest: status pid 3 = 0, pid 4 = 0, result=0
 ```
 
-## Process and address spaces
+## Fork, wait, and memory isolation
 
-`kernel/task/process.c` maintains up to 32 process control blocks. Each PCB
-has a PID, parent PID, state, private address space, ELF entry point, user
-stack, exit status, and ready-queue link.
+`kernel/task/process.c` maintains up to 32 process control blocks with PID,
+parent PID, state, private address space, kernel stack, saved frame pointer,
+CPU ticks, context switch count, quantum, wait target, and exit status.
 
-`kernel/mm/vmm.c` implements address-space creation, switching, cloning,
-mapping, and destruction. Each process receives:
+The `forktest` program verifies three properties end to end:
 
-- A private PML4 root and PDPT.
-- A private user page directory for the 1 to 2 GiB window.
-- Shared supervisor mappings for the low kernel identity window.
-- Shared supervisor mappings for the kernel heap.
-- The shared high-half direct map at 0xFFFFFFFF80000000.
+- The child resumes at the parent call point; both parent and child record
+  distinct process identifiers for the same code location.
+- The child writes a global variable and the parent observes its own unchanged
+  copy, proving that address-space cloning made a private memory copy.
+- The parent blocks in `wait`, the child finishes and exits with status 42, and
+  the parent only then resumes, reaps the child, and validates the status.
 
-The kernel currently executes through the low identity window. The high-half
-window is a verified shared direct map of the first 1 GiB, not a relocated
-kernel text execution window yet.
+```text
+forktest: fork child resumed at parent code point
+forktest: blocking wait returned child status
+forktest: parent exit status 0
+```
 
-Process runs are synchronous in 0.3.0: the kernel switches CR3, enters Ring 3,
-and restores the kernel CR3 after exit. The ready queue, PID allocation,
-fork clone, image replacement, exit status, and wait reaping paths are tested.
-Concurrent user-process scheduling, true fork continuation at the parent's
-instruction pointer, and blocking wait queues remain future work.
+## Graphics stack
 
-## Display foundation
+`kernel/gui/fb.c` probes PCI for the VGA class device, reads BAR0, detects the
+Bochs dispi interface, sets an 800x600x32 linear framebuffer mode, and maps VRAM
+through the shared supervisor device window at 0xFFFFFFFF40000000 that every
+process address space inherits from the shared high-half PDPT. The driver
+supports VRAM readback tests, mode restore, and a heap-backed shadow fallback
+for machines without dispi.
 
-`kernel/include/kernel.h` defines framebuffer metadata, display operations,
-and a display device object. `kernel/drivers/display.c` provides a locked
-registry for display devices. No framebuffer hardware driver, compositor, or
-window manager is implemented yet. The registry is tested with a synthetic
-framebuffer device.
+`kernel/gui/gfx.c` provides a surface abstraction with clipping, clear, plot,
+rectangle fill, horizontal and vertical lines, rectangle frames, blitting,
+checksums, and color counting. The framebuffer exposes a `gfx_surface` over
+mapped VRAM.
+
+`kernel/gui/wm.c` implements the window-manager foundation: up to eight
+windows with heap-backed pixel surfaces, z-order tracking, fill and clear
+operations, composition into a target surface, and destruction.
+
+Ring-3 programs never map VRAM. They query framebuffer metadata and draw
+through the `fb_info`, `fb_rect`, and `fb_pixel` system calls. `guitest` draws
+a background and three colored rectangles, reads pixels back through the
+kernel, and the kernel additionally verifies the real framebuffer content
+after the process exits.
+
+![Z-OS graphics stack](docs/gui.png)
 
 ## Shell
 
@@ -244,12 +291,15 @@ z-os:/# shutdown
 The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `pwd`, `cd`, `ls`, `cat`, `mkdir`, `rmdir`, `touch`, `write`, `append`,
 `rm`, `mv`, `cp`, `stat`, `hexdump`, `df`, `mem`, `free`, `uptime`, `date`,
-`ps`, `threads`, `sleep`, `history`, `rand`, `usertest`, `reboot`, and
-`shutdown`.
+`ps`, `threads`, `sleep`, `history`, `rand`, `usertest`, `schedtest`,
+`forktest`, `gfx`, `reboot`, and `shutdown`.
 
-`usertest` creates a fresh process with a private address space, loads the
-embedded ELF64 program, runs it under its own CR3, reaps it, and reports its
-exit status.
+`usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
+processes under time slicing. `forktest` exercises fork continuation and
+blocking wait. `gfx demo` enters graphics mode and composes two windows;
+`gfx test` performs the same composition, verifies pixels, and restores text
+mode; `gfx off` returns to text mode manually. `ps` reports kernel threads and
+process control blocks.
 
 Line editing supports backspace, Ctrl+C, and Ctrl+L. Arrow keys are decoded
 for the shell but history navigation is not implemented yet.
@@ -259,18 +309,19 @@ for the shell but history navigation is not implemented yet.
 ```text
 boot/          BIOS stage 1, stage 2, and loader constants
 kernel/        freestanding C and NASM kernel
-  arch/        entry, GDT, IDT stubs, context switch, user transition
-  cpu/         GDT, IDT, PIC, ELF64 loader, user transition, power
+  arch/        entry, GDT, IDT stubs, thread and process context switch
+  cpu/         GDT, IDT, PIC, ELF64 loader, power
   drivers/     console, serial, keyboard, input queue, PIT, RTC, display registry
   fs/          VFS and ramfs
   include/     shared kernel interfaces and ELF definitions
   lib/         string and formatted output
   mm/          physical memory, paging, address spaces, heap
+  gui/         framebuffer driver, graphics context, window manager
   sched/       preemptive kernel thread scheduler
   shell/       interactive shell
   subsys/      syscall dispatch
-  task/        process control blocks and process lifecycle
-user/          static ELF64 C user program and linker script
+  task/        process control blocks, process lifecycle, process scheduler
+user/          static ELF64 C user programs and linker script
 tools/         build and verification automation
 docs/          architecture, roadmap, verification
 ```

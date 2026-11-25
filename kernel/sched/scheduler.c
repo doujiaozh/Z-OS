@@ -3,6 +3,7 @@
 #include "heap.h"
 #include "io.h"
 #include "lib.h"
+#include "sched.h"
 #include "string.h"
 #include "timer.h"
 
@@ -170,7 +171,7 @@ void sched_tick(void) {
             threads[index].state = THREAD_READY;
         }
     }
-    if (preempt_depth > 0 || current_thread == NULL) {
+    if (preempt_depth > 0 || current_thread == NULL || sched_user_active()) {
         return;
     }
     struct thread *next = pick_next();

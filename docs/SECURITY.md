@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.3.0 Process. It is deliberately conservative. The system is a development
+0.4.0 Scheduler. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -34,8 +34,27 @@ prototype and must not be used to protect sensitive data.
 - Syscall write lengths are capped at 4096 bytes.
 - The I/O privilege level is zero. Ring-3 code cannot execute `IN`, `OUT`,
   `CLI`, `STI`, `HLT`, or privileged control-register instructions.
-- A ring-3 exception is reported and converts the synchronous process run into
-  an error status instead of panicking the kernel.
+- A ring-3 exception terminates only the faulting process with an error exit
+  status; the kernel continues and the zone is reaped by its parent or the test.
+- User processes are preemptively scheduled, but every switch passes through a
+  single supervisor scheduler path that saves and restores complete interrupt
+  frames and switches CR3 under kernel control. Ring-3 code cannot observe or
+  modify another process kernel stack.
+- Every process kernel stack lives in the shared supervisor heap, so it is not
+  reachable from Ring 3 even while a different process CR3 is loaded.
+- Blocking system calls rewind the saved user instruction pointer by exactly
+  the length of `int 0x80`; the kernel never resumes user code at an
+  attacker-chosen address because the frame is kernel-generated or copied from
+  the caller own saved frame.
+- The framebuffer is mapped only through the shared supervisor device window.
+  Ring-3 programs cannot map VRAM and must draw through validated `fb_info`,
+  `fb_rect`, and `fb_pixel` system calls with coordinate and size bounds.
+- `fb_rect` rejects coordinates above 0xFFFF and the driver clips every
+  rectangle to the active surface, so a process cannot write outside the
+  framebuffer mapping through the system call interface.
+- The scheduler rejects batches that reference missing or non-ready processes
+  and reports deadlock instead of spinning, so a stuck batch returns control to
+  the kernel caller.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -52,21 +71,30 @@ different physical pages at the same virtual addresses.
 
 This is not yet a complete process security boundary:
 
-- User processes are executed synchronously and sequentially, not concurrently.
+- One CPU, one batch at a time; there is no cross-core isolation to design for
+  yet, but also no per-CPU scheduler state.
 - Kernel heap mappings are shared and supervisor-only; the kernel heap is not
   per-process.
-- There are no process credentials, file descriptors, or namespace isolation.
-- `fork` clones a ready process image rather than continuing at the caller's
-  saved instruction pointer.
-- `wait` is nonblocking for syscalls.
+- There are no process credentials, file descriptors, sessions, or namespace
+  isolation.
+- `fork` copies every user page eagerly, so a process can multiply memory usage
+  with repeated fork calls up to the scheduler batch limit and physical memory.
+- `wait` has no timeout and no signal interruption.
+- The process table has 32 fixed slots and no quota or resource accounting.
 - Only the built-in ELF image is supported by `exec`.
 
-### High-half mapping
+### Graphics surfaces
 
 The kernel and every process share a high-half direct map at
-0xFFFFFFFF80000000. This mapping is identical across address spaces and is
-supervisor-only. The kernel still executes from the low identity window in
-0.3.0, so this is not yet a fully relocated higher-half kernel.
+0xFFFFFFFF80000000 and a supervisor device window at 0xFFFFFFFF40000000. Both
+mappings are identical across address spaces and supervisor-only. The kernel
+still executes from the low identity window in 0.4.0, so this is not yet a
+fully relocated higher-half kernel.
+
+Window surfaces live in the kernel heap and are composited by kernel code. They
+are not mapped into any process address space, so a process cannot read another
+window buffer directly; it can only observe the composed framebuffer through
+`fb_pixel`.
 
 ### No executable protection
 
@@ -122,8 +150,8 @@ load time, not by page-table NX bits.
 - There is no preemption-safe read-copy-update mechanism.
 - Console output is serialized with a preemption-disable depth, not a full
   sleepable lock.
-- Synchronous user-process execution disables scheduler preemption, so only one
-  user process runs at a time.
+- Batch user-process execution suspends kernel-thread scheduling, so user
+  processes are the only runnable entities while a batch is active.
 - VFS node pointers have no reference counts. A caller holding a node pointer
   across a concurrent removal would observe freed state.
 - Memory allocation while holding VFS locks can extend interrupt-disabled
@@ -134,6 +162,11 @@ load time, not by page-table NX bits.
 - All processes use fixed user virtual addresses in a 64 KiB window.
 - The loader accepts only static page-aligned `ET_EXEC` images. PIE relocation,
   dynamic linking, argv, envp, and auxiliary vectors are not implemented.
+- User graphics programs share the whole screen: there is no per-window
+  ownership, capability check, or compositor client isolation. Any process can
+  draw over every pixel through the framebuffer system calls.
+- `fb_pixel` lets a process sample screen content, which would be an
+  information leak between windows once multiple applications exist.
 - There is no ASLR, stack protector, RELRO, or dynamic linker.
 - There are no file descriptors or user heap.
 - User buffers are validated and then consumed with interrupts disabled on a
@@ -152,21 +185,23 @@ The current model assumes:
 
 Within that model, the ring transition, per-process user/supervisor page bits,
 ELF validation, syscall pointer validation in the process address space,
-process reaping, and exception containment are implemented and tested.
+interrupt-frame context switching, fork clone isolation, blocking wait restart,
+framebuffer call validation, process reaping, and exception containment are
+implemented and tested.
 
 ## Hardening priorities
 
-1. Preemptive user-process scheduling with per-process kernel and interrupt
-   stacks.
-2. True fork continuation and blocking wait queues.
-3. NX, W^X, SMEP, SMAP, and UMIP.
-4. Stack guard pages and a slab allocator with redzones.
-5. VFS reference counts and credential checks.
-6. Cryptographic random source from hardware or a seeded entropy pool.
-7. ACPI table parsing instead of fixed power ports.
-8. Signed boot and measured boot.
-9. Syscall fuzzing and a kernel sanitizer build.
-10. KASLR and ASLR.
+1. File descriptors, POSIX credentials, sessions, and signals.
+2. NX, W^X, SMEP, SMAP, and UMIP.
+3. Stack guard pages and a slab allocator with redzones.
+4. VFS reference counts and credential checks.
+5. Copy-on-write fork and per-process memory accounting.
+6. Window ownership, compositor client capabilities, and screen read policy.
+7. Cryptographic random source from hardware or a seeded entropy pool.
+8. ACPI table parsing instead of fixed power ports.
+9. Signed boot and measured boot.
+10. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
+11. KASLR and ASLR.
 
 ## Reporting
 

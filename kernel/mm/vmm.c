@@ -12,6 +12,7 @@ static spinlock_t vmm_lock = SPINLOCK_INIT;
 static u64 mapped_pages = 0;
 static u64 boot_pml4_physical = 0;
 static u64 high_pml4_entry = 0;
+static u64 device_pd_physical = 0;
 static bool high_mapping_ready = false;
 
 static u64 *table_from_entry(u64 entry) {
@@ -137,6 +138,13 @@ void vmm_init(void) {
     for (u64 index = 0; index < PAGE_TABLE_ENTRIES; index++) {
         high_pd[index] = (index * 0x200000ULL) | PTE_PRESENT | PTE_WRITABLE | PTE_HUGE;
     }
+    u64 device_pd_frame = pmm_alloc_frame();
+    if (device_pd_frame == 0) {
+        panic("failed to allocate shared device window page tables");
+    }
+    memset((void *)(usize)device_pd_frame, 0, PAGE_SIZE);
+    high_pdpt[509] = device_pd_frame | PTE_PRESENT | PTE_WRITABLE;
+    device_pd_physical = device_pd_frame;
     u64 *pml4_table = (u64 *)pml4;
     pml4_table[511] = high_pdpt_frame | PTE_PRESENT | PTE_WRITABLE;
     high_pml4_entry = pml4_table[511];
@@ -144,6 +152,42 @@ void vmm_init(void) {
     tlb_flush(KERNEL_HIGH_BASE);
     kprintf("VMM: PML4 at %p, identity map below 1 GiB\n", (void *)pml4);
     kprintf("VMM: shared kernel high-half direct map at %p\n", (void *)KERNEL_HIGH_BASE);
+    kprintf("VMM: shared device window at %p\n", (void *)VMM_DEVICE_BASE);
+}
+
+int vmm_map_device_page(u64 virtual_address, u64 physical_address, u64 flags) {
+    if (device_pd_physical == 0) {
+        return -1;
+    }
+    if ((virtual_address & (PAGE_SIZE - 1)) != 0 || (physical_address & (PAGE_SIZE - 1)) != 0) {
+        return -1;
+    }
+    if (virtual_address < VMM_DEVICE_BASE || virtual_address >= VMM_DEVICE_LIMIT) {
+        return -1;
+    }
+    u64 pd_index = (virtual_address >> 21) & 0x1FF;
+    u64 pt_index = (virtual_address >> 12) & 0x1FF;
+    u64 lock_flags;
+    spin_lock_irqsave(&vmm_lock, &lock_flags);
+    u64 *device_pd = (u64 *)device_pd_physical;
+    if ((device_pd[pd_index] & PTE_PRESENT) == 0) {
+        u64 pt_frame = pmm_alloc_frame();
+        if (pt_frame == 0) {
+            spin_unlock_irqrestore(&vmm_lock, lock_flags);
+            return -1;
+        }
+        memset((void *)(usize)pt_frame, 0, PAGE_SIZE);
+        device_pd[pd_index] = pt_frame | PTE_PRESENT | PTE_WRITABLE;
+    }
+    u64 *pt = table_from_entry(device_pd[pd_index]);
+    pt[pt_index] = (physical_address & ADDRESS_MASK) | (flags & 0xFFF) | PTE_PRESENT;
+    tlb_flush(virtual_address);
+    spin_unlock_irqrestore(&vmm_lock, lock_flags);
+    return 0;
+}
+
+u64 vmm_device_base(void) {
+    return VMM_DEVICE_BASE;
 }
 
 u64 vmm_boot_pml4(void) {

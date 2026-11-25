@@ -8,7 +8,7 @@
 #include "serial.h"
 #include "timer.h"
 #include "syscall.h"
-#include "user.h"
+#include "sched.h"
 
 struct idt_entry {
     u16 offset_low;
@@ -113,8 +113,8 @@ static void exception_panic(struct registers *registers) {
 void interrupt_dispatch(struct registers *registers) {
     u64 vector = registers->vector;
     if (vector < 32) {
-        if ((registers->cs & 3) == 3 && user_handle_exception(vector)) {
-            return;
+        if ((registers->cs & 3) == 3) {
+            sched_terminate_current(0x100ULL | vector);
         }
         exception_panic(registers);
         return;

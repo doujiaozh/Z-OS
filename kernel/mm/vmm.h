@@ -16,6 +16,8 @@
 
 #define KERNEL_HIGH_BASE 0xFFFFFFFF80000000ULL
 #define KERNEL_HIGH_LIMIT 0xFFFFFFFFC0000000ULL
+#define VMM_DEVICE_BASE 0xFFFFFFFF40000000ULL
+#define VMM_DEVICE_LIMIT 0xFFFFFFFF80000000ULL
 #define VMM_USER_SPACE_BASE 0x40000000ULL
 #define VMM_USER_SPACE_LIMIT 0x40100000ULL
 #define VMM_USER_STACK_BASE 0x40010000ULL
@@ -47,6 +49,8 @@ int vmm_switch_address_space(const struct address_space *space);
 void vmm_switch_kernel(void);
 int vmm_map_user_page(struct address_space *space, u64 virtual_address, u64 physical_address, u64 flags);
 int vmm_unmap_user_page(struct address_space *space, u64 virtual_address);
+int vmm_map_device_page(u64 virtual_address, u64 physical_address, u64 flags);
+u64 vmm_device_base(void);
 u64 vmm_user_physical(const struct address_space *space, u64 virtual_address);
 bool vmm_user_range_valid_in(const struct address_space *space, u64 address, u64 length);
 

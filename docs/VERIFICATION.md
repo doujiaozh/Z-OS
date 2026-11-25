@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.3.0 Process |
+| Version | 0.4.0 Scheduler |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -43,29 +43,31 @@ The build produces:
 - `build/z-os.img`
 - `build/z-os-test.img`
 - `build/z-os.elf`
-- `build/user_init.elf`
+- `build/user_init.elf`, `build/user_multi.elf`, `build/user_forktest.elf`,
+  `build/user_guitest.elf`
 - `build/manifest.json`
 
-The loader enforces a 320 KiB kernel slot. The 0.3.0 kernel occupies
-approximately 72 KiB of the slot, leaving room for additional subsystems. The
-image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and the
-user ELF are written to `build/manifest.json` after every build.
+The loader enforces a 320 KiB kernel slot. The 0.4.0 kernel occupies
+approximately 117 KiB of the slot, leaving room for additional subsystems. The
+image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and all
+four user ELF programs are written to `build/manifest.json` after every build.
 
 ## Self-test result
 
-The self-test image executes 73 checks and exits QEMU through the ISA debug
+The self-test image executes 107 checks and exits QEMU through the ISA debug
 exit device. A successful run returns host exit status 33, which is
 `(0x10 << 1) | 1`. A failure returns 35.
 
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=73 failed=0
+ZTEST SUMMARY passed=107 failed=0
 ZTEST RESULT PASS
 ```
 
-The original 49 checks remain in place. This milestone adds 20 process,
-address-space, high-half, and lifecycle checks plus 4 display registry checks.
+The original 73 checks remain in place. This milestone adds 34 checks covering
+preemptive time slicing, fork continuation, blocking wait, framebuffer VRAM
+access, graphics primitives, window composition, and user graphics output.
 
 Test coverage by area:
 
@@ -80,26 +82,38 @@ Test coverage by area:
 | Time | RTC field sanity, timer progress across a sleep |
 | Scheduler | Thread creation, preemptive completion, atomic counter correctness |
 | ELF64 | Embedded image validation, entry and segments, bad magic, truncation, W^X rejection, address range rejection |
-| Address spaces | Distinct PML4 roots, distinct user frames, cross-space invisibility, high-half identity, high-alias translation |
-| Processes | Creation, PID/parent links, fork clone, exec image replacement, exit status, wait reaping, table drain |
-| Display | Framebuffer registration, lookup, primary selection, count, unregistration |
-| User mode | Ring-3 C program in a per-process address space, syscall write, syscall exit, return to kernel |
+| Address spaces | Distinct PML4 roots, distinct user frames, cross-space invisibility, high-half identity, high-alias translation, private kernel stacks |
+| Processes | Creation, PID/parent links, image replacement, exit status, reaping, table drain |
+| Preemption | Quantum configuration, two-process completion, marker totals, interleaving, forced switch counters |
+| Fork and wait | Child resumes at parent code point, private memory copy, parent memory integrity, blocking order, exit status |
+| Framebuffer | PCI VGA probe, BAR address, VRAM read/write/readback, mode set, mode dimensions, surface exposure |
+| Graphics | Rectangle fill counts, clipping, checksums, pixel readback |
+| Window manager | Window creation, second window, composition, first and later window drawing, z order, destruction, composition removal, table drain |
+| User graphics | Ring-3 program exit status, real framebuffer pixels after drawing |
+| Display registry | Framebuffer registration, lookup, primary selection, count, unregistration |
+| User mode | Ring-3 C program under the process scheduler, syscall write, syscall exit, reaping |
 
-The user-mode test path produces the following serial output:
+The scheduler and graphics tests produce the following serial output:
 
 ```text
-User: loaded ELF64 entry 0x40000000 with 2 segments, stack 0x40010000
-User: entering ring 3
-Hello from Z-OS ring 3
-User syscall return path verified
-C ELF64 user program checksum verified
-ELF64 BSS zero check verified
+multi: process started
+multi: process started
+multi: process finished
+multi: process finished
+forktest: program started
+forktest: fork child resumed at parent code point
+forktest: blocking wait returned child status
+guitest: graphics program started
+guitest: framebuffer info received
+guitest: rectangles drawn to framebuffer
+guitest: pixel readback verified
 ```
 
-The process test additionally runs two instances of the same ELF image in
-separate address spaces and produces two runs of the user program output. The
-high-half direct map at 0xFFFFFFFF80000000 is identical in both process PML4
-trees and resolves the kernel image physical address.
+The preemption test additionally verifies that the marker trace records both
+process identifiers, that the trace interleaves them, that the timer
+preemption counter increases, and that both processes record forced context
+switches. The fork test verifies that parent and child share a code location
+but not memory, and that the wait return mark appears after the child exit mark.
 
 ## Boot smoke test
 
@@ -115,6 +129,8 @@ The process is then terminated and the log is checked for panic or exception
 markers. This verifies the normal image path independent of self-test mode.
 
 ![Z-OS console](console.png)
+
+![Z-OS graphics stack](gui.png)
 
 ## PS/2 keyboard test
 
@@ -146,17 +162,24 @@ the shell over COM1. The following commands and properties are checked:
 - `uptime` advances.
 - `ps` shows the init and shell threads.
 - `rand` produces random bytes.
-- `usertest` creates a process with a private PML4, maps the embedded ELF,
-  enters Ring 3 under the process CR3, verifies a checksum and zeroed BSS,
-  exits with status 0, and cleans up through wait.
+- `usertest` runs the ring-3 program as a scheduled process and reaps it.
+- `schedtest` runs two processes under time slicing and reports quantum,
+  completions, preemption count, and both exit statuses.
+- `forktest` runs the fork and blocking wait program and reports the parent
+  exit status.
+- `gfx test` enters graphics mode, composes two windows, verifies framebuffer
+  pixels, and restores text mode.
 - `cat /README` reads the boot filesystem image.
 - `shutdown` issues the ACPI PM1a power request and makes QEMU exit with
   status 0.
 
-The shell observes the process-mode line:
+The shell observes the scheduler and graphics lines:
 
 ```text
-User: entering ring 3 in process address space 0x93e000
+schedtest: quantum=2 ticks completed=2 preemptions=...
+gfx: framebuffer 800x600x32 at 0xfd000000, surface vram
+gfx: window manager composited 2 windows
+gfx: composition verified
 ```
 
 The test fails on unexpected panic, exception, or unknown-command output.
@@ -196,20 +219,21 @@ rebuilds first unless `--skip-build` is supplied.
 
 - Physical hardware.
 - SMP, APIC, or multi-core interrupt behavior.
-- Preemptive or concurrent user-process scheduling. Processes are executed
-  synchronously and sequentially in this milestone.
-- True fork continuation at the parent's saved user instruction pointer.
-- Blocking wait queues, signals, process credentials, or a file-descriptor table.
+- SMP or concurrent execution on more than one CPU. The scheduler is
+  single-core round robin, one batch at a time.
+- POSIX signals, credentials, sessions, or a file-descriptor table.
+- Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
+- Text rendering, mouse input, damage tracking, or a user-space compositor.
 - The kernel executing from the high-half direct map. The high-half window is
   mapped and tested, while kernel text still executes through the low identity
   window.
 - Long-running stability beyond the boot tests.
-- Disk persistence, networking, USB, audio, graphics acceleration, or GPU.
+- Disk persistence, networking, USB, audio, 3D acceleration, or GPU drivers.
 - Windows, Linux, or macOS binary compatibility.
 - Adversarial security resistance.
 - Memory hotplug, CPU hotplug, suspend, or resume.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.3.0 test run.
+passing 0.4.0 test run.

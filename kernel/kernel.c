@@ -11,6 +11,7 @@
 #include "pic.h"
 #include "process.h"
 #include "rtc.h"
+#include "sched.h"
 #include "serial.h"
 #include "shell.h"
 #include "string.h"
@@ -19,6 +20,8 @@
 #include "tests.h"
 #include "vfs.h"
 #include "vmm.h"
+#include "wm.h"
+#include "fb.h"
 
 void kmain(struct boot_info *boot) {
     serial_init();
@@ -44,7 +47,17 @@ void kmain(struct boot_info *boot) {
     heap_init();
     vfs_init();
     process_init();
+    sched_process_init();
+    fb_init();
+    wm_init();
     sched_init();
+
+    if (fb_device_found()) {
+        kprintf("FB: vga device at %p, dispi %s\n", (void *)fb_pci_address(),
+                fb_dispi_supported() ? "supported" : "unavailable");
+    } else {
+        kprintf("FB: no pci vga device detected\n");
+    }
 
     timer_init(TIMER_FREQUENCY);
     keyboard_init();

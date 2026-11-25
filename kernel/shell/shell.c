@@ -1,5 +1,7 @@
 #include "shell.h"
 #include "console.h"
+#include "fb.h"
+#include "gfx.h"
 #include "heap.h"
 #include "input.h"
 #include "kernel.h"
@@ -8,11 +10,13 @@
 #include "power.h"
 #include "process.h"
 #include "rtc.h"
+#include "sched.h"
 #include "string.h"
 #include "thread.h"
 #include "timer.h"
 #include "user.h"
 #include "vfs.h"
+#include "wm.h"
 
 #define SHELL_LINE_MAX 256
 #define SHELL_ARG_MAX 16
@@ -197,11 +201,14 @@ static void command_help(void) {
     kprintf("  mem, free            physical and kernel memory summary\n");
     kprintf("  uptime               time since boot\n");
     kprintf("  date                 real-time clock\n");
-    kprintf("  ps, threads          list kernel threads\n");
+    kprintf("  ps, threads          list kernel threads and processes\n");
     kprintf("  sleep <ms>           sleep for milliseconds\n");
     kprintf("  history              show command history\n");
     kprintf("  rand [bytes]         print random bytes\n");
-    kprintf("  usertest             load and run an ELF64 process in a new address space\n");
+    kprintf("  usertest             run the ELF64 ring-3 program as a process\n");
+    kprintf("  schedtest            run two user processes under time slicing\n");
+    kprintf("  forktest             run the fork and blocking wait program\n");
+    kprintf("  gfx [demo|test|off]  framebuffer, gfx and window manager control\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -210,7 +217,8 @@ static void command_about(void) {
     kprintf("Z-OS %s %s\n", Z_OS_VERSION, Z_OS_CODENAME);
     kprintf("A compact x86_64 operating system with a preemptive kernel,\n");
     kprintf("per-process address spaces, a shared high-half map, static ELF64\n");
-    kprintf("loading, ring-3 syscalls, and a serial console.\n");
+    kprintf("processes, a framebuffer graphics stack, ring-3 syscalls, and a\n");
+    kprintf("window manager foundation.\n");
 }
 
 static void command_uname(void) {
@@ -534,7 +542,20 @@ static void command_ps(void) {
                 statuses[index].cpu_ticks, statuses[index].stack_size / 1024,
                 statuses[index].name);
     }
-    kprintf("processes: %llu total, %llu ready\n", process_count(), process_ready_count());
+    kprintf("processes: %llu total, %llu ready, %llu blocked\n",
+            process_count(), process_ready_count(), process_blocked_count());
+    struct process snapshot[MAX_PROCESSES];
+    u32 process_total = process_snapshot(snapshot, MAX_PROCESSES);
+    if (process_total > 0) {
+        kprintf("ppid  pid  state     ticks  switches  name\n");
+        for (u32 index = 0; index < process_total; index++) {
+            kprintf("%4llu  %3llu  %-8s  %5llu  %8llu  %s\n",
+                    snapshot[index].parent_pid, snapshot[index].pid,
+                    process_state_name(snapshot[index].state),
+                    snapshot[index].cpu_ticks, snapshot[index].context_switches,
+                    snapshot[index].name);
+        }
+    }
 }
 
 static void command_sleep(int argc, char *arguments[]) {
@@ -621,23 +642,132 @@ static void command_rand(int argc, char *arguments[]) {
     }
 }
 
-static void command_usertest(void) {
-    u64 image_size = (u64)(user_program_end - user_program_start);
-    struct process *process = process_create("usertest", 0, user_program_start, image_size);
+static u64 run_single_program(const char *name, const u8 *image_start, const u8 *image_end, u64 *status)
+{
+    u64 image_size = (u64)(image_end - image_start);
+    struct process *process = process_create(name, 0, image_start, image_size);
     if (process == NULL) {
-        kprintf("user program failed to start (%d)\n", PROCESS_ERROR_MEMORY);
-        return;
+        return 0;
     }
     u64 pid = process->pid;
-    u64 exit_code = 0;
-    int result = process_run(pid, &exit_code);
-    u64 status = 0;
-    process_wait(0, pid, &status);
-    if (result != 0) {
-        kprintf("user program failed to start (%d)\n", result);
+    u32 completed = 0;
+    int result = sched_run_batch(&pid, 1, &completed);
+    u64 reaped_pid = 0;
+    u64 exit_status = 0xFFFFFFFFFFFFFFFFULL;
+    process_reap_child(0, pid, &reaped_pid, &exit_status);
+    if (status != NULL) {
+        *status = exit_status;
+    }
+    if (result != SCHED_ERROR_NONE || completed != 1) {
+        return 0;
+    }
+    return reaped_pid;
+}
+
+static void command_usertest(void) {
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("usertest", user_program_start, user_program_end, &status);
+    if (pid == 0) {
+        kprintf("user program failed to run\n");
         return;
     }
     kprintf("user program exited with status %llu\n", status);
+}
+
+static void command_schedtest(void) {
+    u64 image_size = (u64)(user_multi_end - user_multi_start);
+    struct process *first = process_create("multi-a", 0, user_multi_start, image_size);
+    struct process *second = process_create("multi-b", 0, user_multi_start, image_size);
+    if (first == NULL || second == NULL) {
+        kprintf("schedtest: process creation failed\n");
+        process_reap_zombies();
+        return;
+    }
+    u64 pids[2];
+    pids[0] = first->pid;
+    pids[1] = second->pid;
+    u64 before = sched_preemption_count();
+    u32 completed = 0;
+    int result = sched_run_batch(pids, 2, &completed);
+    u64 first_status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 second_status = 0xFFFFFFFFFFFFFFFFULL;
+    process_reap_child(0, pids[0], NULL, &first_status);
+    process_reap_child(0, pids[1], NULL, &second_status);
+    kprintf("schedtest: quantum=%llu ticks completed=%u preemptions=%llu\n",
+            sched_quantum_ticks(), completed, sched_preemption_count() - before);
+    kprintf("schedtest: status pid %llu = %llu, pid %llu = %llu, result=%d\n",
+            pids[0], first_status, pids[1], second_status, result);
+}
+
+static void command_forktest(void) {
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("forktest", user_forktest_start, user_forktest_end, &status);
+    if (pid == 0) {
+        kprintf("forktest: program failed to run\n");
+        return;
+    }
+    kprintf("forktest: parent exit status %llu\n", status);
+}
+
+static void command_gfx(int argc, char *arguments[]) {
+    const char *mode = argc > 1 ? arguments[1] : "demo";
+    if (strcmp(mode, "off") == 0) {
+        fb_restore_text();
+        console_clear();
+        kprintf("gfx: framebuffer restored to text mode\n");
+        return;
+    }
+    bool test_only = strcmp(mode, "test") == 0;
+    if (fb_set_mode(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT, FB_DEFAULT_BPP) != 0) {
+        kprintf("gfx: framebuffer mode set failed\n");
+        return;
+    }
+    struct gfx_surface *surface = fb_surface();
+    if (surface == NULL) {
+        kprintf("gfx: no graphics surface available\n");
+        fb_restore_text();
+        return;
+    }
+    gfx_clear(surface, 0x00101A2AU);
+    gfx_fill_rect(surface, 0, 0, FB_DEFAULT_WIDTH, 28, 0x00E8EEF7U);
+    gfx_fill_rect(surface, 0, FB_DEFAULT_HEIGHT - 28, FB_DEFAULT_WIDTH, 28, 0x00202A38U);
+    wm_init();
+    struct wm_window *left = wm_create(48, 64, 300, 220, 0x00F0F4FAU);
+    struct wm_window *right = wm_create(392, 96, 340, 260, 0x00E6ECF6U);
+    if (left != NULL) {
+        wm_fill(left->id, 0, 0, 300, 24, 0x003C6E9EU);
+        wm_fill(left->id, 16, 40, 120, 72, 0x00D9453DU);
+        wm_fill(left->id, 148, 40, 120, 72, 0x002E9E5BU);
+        wm_fill(left->id, 16, 124, 252, 72, 0x002F6FB5U);
+    }
+    if (right != NULL) {
+        wm_fill(right->id, 0, 0, 340, 24, 0x0080401AU);
+        wm_fill(right->id, 16, 40, 308, 96, 0x00F2C14EU);
+        wm_fill(right->id, 16, 148, 146, 88, 0x007B4FA0U);
+        wm_fill(right->id, 178, 148, 146, 88, 0x002AA6A6U);
+    }
+    wm_draw_to(surface);
+    bool verified = fb_pixel(120, 140) == 0x00D9453DU &&
+                    fb_pixel(460, 200) == 0x00F2C14EU &&
+                    fb_pixel(620, 280) == 0x002AA6A6U &&
+                    fb_pixel(100, 70) == 0x003C6E9EU;
+    kprintf("gfx: framebuffer %ux%ux%u at %p, surface %s\n",
+            fb_current_mode().width, fb_current_mode().height,
+            fb_current_mode().bits_per_pixel, (void *)fb_current_mode().physical,
+            fb_current_mode().shadow ? "shadow" : "vram");
+    kprintf("gfx: window manager composited %u windows\n", wm_count());
+    kprintf("gfx: composition %s\n", verified ? "verified" : "failed");
+    while (wm_count() > 0) {
+        u32 id = wm_zorder_at(0);
+        wm_destroy(id);
+    }
+    if (test_only) {
+        fb_restore_text();
+        console_clear();
+        kprintf("gfx: test complete, framebuffer restored to text mode\n");
+    } else {
+        kprintf("gfx: graphics mode active, run 'gfx off' to return to text mode\n");
+    }
 }
 
 static void execute_command(int argc, char *arguments[]) {
@@ -705,6 +835,12 @@ static void execute_command(int argc, char *arguments[]) {
         command_rand(argc, arguments);
     } else if (strcmp(command, "usertest") == 0) {
         command_usertest();
+    } else if (strcmp(command, "schedtest") == 0) {
+        command_schedtest();
+    } else if (strcmp(command, "forktest") == 0) {
+        command_forktest();
+    } else if (strcmp(command, "gfx") == 0) {
+        command_gfx(argc, arguments);
     } else if (strcmp(command, "reboot") == 0) {
         system_reboot();
     } else if (strcmp(command, "shutdown") == 0 || strcmp(command, "poweroff") == 0) {

@@ -36,6 +36,7 @@ CFLAGS = [
     "-Ikernel/include",
     "-Ikernel/mm",
     "-Ikernel/task",
+    "-Ikernel/gui",
 ]
 USER_CFLAGS = [
     "--target=x86_64-none-elf",
@@ -138,24 +139,32 @@ def build_boot():
     return stage1, stage2
 
 
+USER_PROGRAMS = ["init", "multi", "forktest", "guitest"]
+
+
 def build_user():
     nasm, clang, lld, _ = tools()
-    source = ROOT / "user" / "init.c"
     linker = ROOT / "user" / "user.ld"
-    object_path = BUILD / "user_init.o"
-    elf_path = BUILD / "user_init.elf"
+    elf_paths = []
+    for name in USER_PROGRAMS:
+        source = ROOT / "user" / (name + ".c")
+        object_path = BUILD / ("user_" + name + ".o")
+        elf_path = BUILD / ("user_" + name + ".elf")
+        run([clang] + USER_CFLAGS + ["-I", str(ROOT / "user"), "-c", str(source), "-o", str(object_path)])
+        run([lld, "-m", "elf_x86_64", "-z", "noexecstack", "-T", str(linker),
+             "-o", str(elf_path), str(object_path)])
+        image = elf_path.read_bytes()
+        if len(image) < 64 or image[0:4] != b"\x7fELF" or image[4] != 2 or image[5] != 1:
+            raise SystemExit("user ELF header is invalid: " + name)
+        if int.from_bytes(image[16:18], "little") != 2:
+            raise SystemExit("user ELF is not an executable: " + name)
+        if int.from_bytes(image[18:20], "little") != 62:
+            raise SystemExit("user ELF is not x86_64: " + name)
+        elf_paths.append(elf_path)
     embed_path = BUILD / "user_program.o"
-    run([clang] + USER_CFLAGS + ["-c", str(source), "-o", str(object_path)])
-    run([lld, "-m", "elf_x86_64", "-z", "noexecstack", "-T", str(linker), "-o", str(elf_path), str(object_path)])
-    image = elf_path.read_bytes()
-    if len(image) < 64 or image[0:4] != b"\x7fELF" or image[4] != 2 or image[5] != 1:
-        raise SystemExit("user ELF header is invalid")
-    if int.from_bytes(image[16:18], "little") != 2:
-        raise SystemExit("user ELF is not an executable")
-    if int.from_bytes(image[18:20], "little") != 62:
-        raise SystemExit("user ELF is not x86_64")
-    run([nasm, "-f", "elf64", "-I", str(BUILD) + os.sep, str(ROOT / "user" / "program.asm"), "-o", str(embed_path)])
-    return embed_path, elf_path
+    run([nasm, "-f", "elf64", "-I", str(BUILD) + os.sep, str(ROOT / "user" / "program.asm"),
+         "-o", str(embed_path)])
+    return embed_path, elf_paths
 
 
 def make_image(kernel_flat, stage1, stage2, name):
@@ -176,7 +185,7 @@ def make_image(kernel_flat, stage1, stage2, name):
 def build():
     clean()
     stage1, stage2 = build_boot()
-    user_obj, user_elf = build_user()
+    user_obj, user_elfs = build_user()
     release = compile_kernel("release", [], [user_obj])
     test = compile_kernel("selftest", ["-DZ_SELFTEST"], [user_obj])
     image = make_image(release, stage1, stage2, "z-os.img")
@@ -187,10 +196,14 @@ def build():
         "image_size": image.stat().st_size,
         "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
         "test_image_sha256": hashlib.sha256(test_image.read_bytes()).hexdigest(),
-        "user_elf_size": user_elf.stat().st_size,
-        "user_elf_sha256": hashlib.sha256(user_elf.read_bytes()).hexdigest(),
+        "user_programs": {},
         "user_object": str(user_obj.relative_to(ROOT)),
     }
+    for elf in user_elfs:
+        manifest["user_programs"][elf.stem] = {
+            "size": elf.stat().st_size,
+            "sha256": hashlib.sha256(elf.read_bytes()).hexdigest(),
+        }
     (BUILD / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2))
 
