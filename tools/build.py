@@ -186,6 +186,8 @@ def make_image(kernel_flat, stage1, stage2, name):
 def build():
     clean()
     stage1, stage2 = build_boot()
+    stage1_bytes = stage1.read_bytes()
+    stage2_bytes = stage2.read_bytes()
     user_obj, user_elfs = build_user()
     release = compile_kernel("release", [], [user_obj])
     test = compile_kernel("selftest", ["-DZ_SELFTEST"], [user_obj])
@@ -193,7 +195,12 @@ def build():
     test_image = make_image(test, stage1, stage2, "z-os-test.img")
     manifest = {
         "kernel_size": release.stat().st_size,
+        "kernel_sha256": hashlib.sha256(release.read_bytes()).hexdigest(),
         "test_kernel_size": test.stat().st_size,
+        "stage1_size": len(stage1_bytes),
+        "stage1_sha256": hashlib.sha256(stage1_bytes).hexdigest(),
+        "stage2_size": len(stage2_bytes),
+        "stage2_sha256": hashlib.sha256(stage2_bytes).hexdigest(),
         "image_size": image.stat().st_size,
         "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
         "test_image_sha256": hashlib.sha256(test_image.read_bytes()).hexdigest(),

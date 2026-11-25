@@ -1,4 +1,6 @@
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import socket
@@ -337,9 +339,77 @@ def run_shell():
                 process.wait()
 
 
+def run_bootcheck():
+    print("== boot fault check ==")
+    qemu = find_qemu()
+    manifest = json.loads((BUILD / "manifest.json").read_text(encoding="utf-8"))
+    image = (BUILD / "z-os.img").read_bytes()
+    stages = [
+        ("stage1", image[0:manifest["stage1_size"]], manifest["stage1_sha256"]),
+        ("stage2", image[512:512 + manifest["stage2_size"]], manifest["stage2_sha256"]),
+        ("kernel", image[33 * 512:33 * 512 + manifest["kernel_size"]], manifest["kernel_sha256"]),
+    ]
+    for name, data, expected in stages:
+        actual = hashlib.sha256(data).hexdigest()
+        if actual != expected:
+            raise CheckFailure("image " + name + " digest does not match a fresh build")
+    print("image integrity PASS")
+
+    targets = [
+        ("z-os.img", ["Z-OS", "Boot complete. Starting shell.", "z-os:"], 25),
+        ("z-os-test.img", ["Z-OS", "ZTEST BEGIN"], 40),
+    ]
+    for image_name, markers, deadline_seconds in targets:
+        serial_path = BUILD / (image_name.replace(".", "_") + ".serial.log")
+        trace_path = BUILD / (image_name.replace(".", "_") + ".trace.log")
+        for path in (serial_path, trace_path):
+            if path.exists():
+                path.unlink()
+        command = [qemu] + base_drive(image_name) + [
+            "-display", "none",
+            "-serial", "file:" + str(serial_path),
+            "-d", "int,cpu_reset,guest_errors",
+            "-D", str(trace_path),
+        ]
+        process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        deadline = time.time() + deadline_seconds
+        log = ""
+        try:
+            while time.time() < deadline:
+                if process.poll() is not None:
+                    break
+                if serial_path.exists():
+                    log = serial_path.read_text(encoding="utf-8", errors="replace")
+                    if all(marker in log for marker in markers):
+                        break
+                time.sleep(0.2)
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        if serial_path.exists():
+            log = serial_path.read_text(encoding="utf-8", errors="replace")
+        trace = trace_path.read_text(encoding="utf-8", errors="replace") if trace_path.exists() else ""
+        triple_faults = trace.count("Triple fault")
+        if triple_faults != 0:
+            raise CheckFailure(image_name + " reported " + str(triple_faults) + " triple faults")
+        page_faults = trace.count("v=0e")
+        if page_faults != 0:
+            raise CheckFailure(image_name + " reported " + str(page_faults) + " page fault exceptions during boot")
+        for marker in markers:
+            if marker not in log:
+                raise CheckFailure(image_name + " missing boot marker: " + marker + "\n" + log)
+        print(image_name + " boot trace clean, markers found")
+    print("boot fault check PASS")
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["build", "test", "smoke", "keyboard", "shell", "all"])
+    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "keyboard", "shell", "all"])
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     if args.action == "build":
@@ -353,6 +423,8 @@ def main():
         run_selftest()
     if args.action in ("smoke", "all"):
         run_smoke()
+    if args.action in ("bootcheck", "all"):
+        run_bootcheck()
     if args.action in ("keyboard", "all"):
         run_keyboard()
     if args.action in ("shell", "all"):

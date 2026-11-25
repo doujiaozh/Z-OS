@@ -163,6 +163,7 @@ Individual checks:
 ```bash
 python tools/verify.py test
 python tools/verify.py smoke
+python tools/verify.py bootcheck
 python tools/verify.py keyboard
 python tools/verify.py shell
 ```
@@ -177,7 +178,10 @@ packets, compositor layering, POSIX user programs, and the ring-3 syscall
 round trip. It then exits QEMU through the ISA debug exit device, so the
 harness can validate a machine-readable result rather than a screenshot.
 
-The keyboard check injects `help` through the QEMU monitor, exercising the
+The boot fault check re-verifies the image stage digests against the build
+manifest, boots both images with QEMU interrupt tracing, and fails on any
+triple fault or page-fault exception before the shell prompt. The keyboard
+check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a
 TCP serial backend, runs shell commands, and verifies file creation, reads,

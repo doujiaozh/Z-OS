@@ -74,9 +74,21 @@ Stage 2 occupies exactly 32 sectors, from LBA 1 through LBA 32.
 5. It copies the staging area to 0x100000.
 6. It builds identity page tables for the first 1 GiB with 2 MiB pages:
    PML4 at 0x1000, PDPT at 0x2000, PD at 0x3000.
-7. It enables PAE, long mode, and paging, then far jumps to a 64-bit code
-   descriptor.
-8. It places the BootInfo pointer in RDI and jumps to 0x100000.
+7. It validates the four page-table entries it just wrote before enabling
+   paging: PML4[0] must equal 0x2003, PDPT[0] 0x3003, PD[0] 0x83, and PD[1]
+   0x200083. A mismatch writes a visible `Z-OS STAGE2 PAGING ERROR` message to
+   the VGA text buffer and halts instead of triple faulting.
+8. It enables PAE and loads CR3, then sets EFER.LME and reads EFER back to
+   confirm the long-mode enable bit actually took effect.
+9. It enables paging, reloads CR3 to invalidate stale TLB entries, and far
+   jumps to the 64-bit code descriptor.
+10. It places the BootInfo pointer in RDI and jumps to 0x100000.
+
+Every loader failure path reports to the VGA text buffer, so an early paging
+breakdown produces a readable message rather than a reset loop. The kernel
+installs its real IDT in `kmain` before the physical allocator, page-table
+manager, and heap start touching mapped memory, so faults after that point are
+reported by the exception handler instead of escalating.
 
 The kernel accepts the fixed kernel slot. The build fails if the flat kernel
 exceeds 320 KiB.
@@ -635,7 +647,9 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 `tools/build.py` performs:
 
 1. Assemble stage 1 and verify it is exactly 512 bytes.
-2. Assemble stage 2 and verify it is exactly 16 KiB.
+2. Assemble stage 2 and verify it is exactly 16 KiB. The build records
+   SHA-256 digests for stage 1, stage 2, the flat kernel, both images, and all
+   user programs in `build/manifest.json`.
 3. Compile the C user program, link the static ELF64 image, and assemble the
    embedding object that includes the complete ELF.
 4. Compile every kernel C file twice: normal and with `-DZ_SELFTEST`.
@@ -656,6 +670,10 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
 ## Reliability and current boundaries
 
 - Malformed BootInfo leads to a panic, not recovery.
+- Stage 2 validates its page tables and EFER state before enabling paging and
+  reports failures to the VGA text buffer; the automated boot fault check also
+  verifies that both images boot with no triple faults and no page-fault
+  exceptions.
 - Kernel page faults, invalid opcodes, double faults, and stack faults halt.
 - User exceptions terminate the current process with an error status; the
   batch driver reports it and the caller reaps the zombie. There is no

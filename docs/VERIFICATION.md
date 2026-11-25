@@ -32,6 +32,7 @@ Individual stages:
 ```bash
 python tools/verify.py test
 python tools/verify.py smoke
+python tools/verify.py bootcheck
 python tools/verify.py keyboard
 python tools/verify.py shell
 ```
@@ -49,8 +50,10 @@ The build produces:
 
 The loader enforces a 320 KiB kernel slot. The 0.5.0 kernel occupies
 approximately 159 KiB of the slot, leaving room for additional subsystems. The
-image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and all
-six user ELF programs are written to `build/manifest.json` after every build.
+image is zero-padded to 1,474,560 bytes. SHA-256 hashes for stage 1, stage 2,
+the flat kernel, both images, and all six user ELF programs are written to
+`build/manifest.json` after every build. The boot fault check cross-checks the
+image layout against those digests.
 
 ## Self-test result
 
@@ -138,6 +141,24 @@ z-os:/#
 
 The process is then terminated and the log is checked for panic or exception
 markers. This verifies the normal image path independent of self-test mode.
+
+## Boot fault check
+
+The boot fault check verifies image integrity and early boot robustness:
+
+- The image is sliced into stage 1, stage 2, and kernel regions, and each slice
+  digest is compared with the digest recorded in `build/manifest.json`, which
+  detects a stale or foreign image that was not produced by the current build.
+- Each image is booted headless with QEMU tracing `int,cpu_reset,guest_errors`.
+- The normal image must print the Z-OS banner, the boot completion line, and
+  the shell prompt.
+- The self-test image must print the banner and `ZTEST BEGIN`.
+- The trace must contain zero `Triple fault` records and zero page-fault
+  exceptions (`v=0e`).
+
+This stage exists because an early paging or loader failure otherwise shows up
+only as a reset loop. It is part of the `all` stage and can be run alone with
+`python tools/verify.py bootcheck` or `make bootcheck`.
 
 ![Z-OS console](console.png)
 

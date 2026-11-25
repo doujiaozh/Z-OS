@@ -170,6 +170,7 @@ protected_entry:
     add edi, 8
     loop .map
 
+    call validate_paging
     mov eax, cr4
     or eax, 0x20
     mov cr4, eax
@@ -179,10 +180,48 @@ protected_entry:
     rdmsr
     or eax, 0x100
     wrmsr
+    mov ecx, 0xC0000080
+    rdmsr
+    test eax, 0x100
+    jz paging_error
     mov eax, cr0
     or eax, 0x80000001
     mov cr0, eax
+    mov eax, 0x1000
+    mov cr3, eax
     jmp 0x18:long_entry
+
+validate_paging:
+    mov eax, [0x1000]
+    cmp eax, 0x00002003
+    jne .invalid
+    mov eax, [0x2000]
+    cmp eax, 0x00003003
+    jne .invalid
+    mov eax, [0x3000]
+    cmp eax, 0x00000083
+    jne .invalid
+    mov eax, [0x3008]
+    cmp eax, 0x00200083
+    jne .invalid
+    ret
+.invalid:
+    pop eax
+    jmp paging_error
+
+paging_error:
+    mov edi, 0xB8000
+    mov esi, paging_error_text
+    mov ecx, paging_error_text_length
+    mov ah, 0x4F
+.copy:
+    lodsb
+    stosw
+    loop .copy
+.halt:
+    cli
+    hlt
+    jmp .halt
 
 BITS 64
 long_entry:
@@ -207,6 +246,8 @@ retries db 0
 sector_index dw 0
 e820_count db 0
 disk_message db "Z-OS stage2 disk error", 13, 10, 0
+paging_error_text db "Z-OS STAGE2 PAGING ERROR"
+paging_error_text_length equ $ - paging_error_text
 
 align 8
 gdt_start:
