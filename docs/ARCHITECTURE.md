@@ -74,17 +74,29 @@ Stage 2 occupies exactly 32 sectors, from LBA 1 through LBA 32.
 5. It copies the staging area to 0x100000.
 6. It builds identity page tables for the first 1 GiB with 2 MiB pages:
    PML4 at 0x1000, PDPT at 0x2000, PD at 0x3000.
-7. It validates the page tables before enabling paging. Each table base must
+7. It asks the CPU whether long mode exists: CPUID leaf 0x80000000 must
+   report a maximum extended leaf of at least 0x80000001, and CPUID leaf
+   0x80000001 must set EDX bit 29. A CPU without long mode produces diagnostic
+   code 6 instead of a fault.
+8. It validates the page tables before enabling paging. Each table base must
    be 4096-byte aligned, and the four entries written earlier must match the
    expected values exactly: PML4[0] 0x2003, PDPT[0] 0x3003, PD[0] 0x83, and
    PD[1] 0x200083. A failure writes a red VGA message with a diagnostic code
    and halts instead of triple faulting.
-8. It enters long mode in the canonical order: enable CR4.PAE, set EFER.LME,
-   read EFER back to confirm the enable bit took effect, load CR3 with the
-   PML4 frame, set CR0.PG, then perform the far jump to the 64-bit code
+9. It enters long mode in the Intel manual order: set CR4.PAE, read CR4 back to
+   confirm the PAE bit is set (code 7 otherwise), read MSR 0xC0000080 into
+   EAX:EDX, set bit 8 with `bts`, write the MSR back, read the MSR again and
+   test bit 8 (code 5 if it did not take effect), load CR3 with the PML4 frame,
+   set CR0.PG and CR0.PE, then perform the far jump to the 64-bit code
    descriptor. CR3 is reloaded once after paging is enabled to discard stale
    TLB entries.
-9. It places the BootInfo pointer in RDI and jumps to 0x100000.
+10. It places the BootInfo pointer in RDI and jumps to 0x100000.
+
+The kernel repeats the verification from the other side of the transition:
+`kmain` reads MSR 0xC0000080 and CR4, requires EFER.LME and CR4.PAE to be set,
+panics if either is missing, and prints `Long mode: EFER.LME verified,
+CR4.PAE verified` so the transition is confirmed both in the loader and in the
+64-bit kernel.
 
 Loader diagnostic codes shown on the VGA screen:
 
@@ -94,7 +106,9 @@ Loader diagnostic codes shown on the VGA screen:
 | `Z-OS STAGE2 PAGING ERROR 2` | PDPT base misaligned or PDPT[0] wrong |
 | `Z-OS STAGE2 PAGING ERROR 3` | Page directory base misaligned or PD[0] wrong |
 | `Z-OS STAGE2 PAGING ERROR 4` | PD[1] wrong, identity map incomplete |
-| `Z-OS STAGE2 LONG MODE ERROR 5` | EFER.LME did not take effect |
+| `Z-OS STAGE2 LONG MODE ERROR 5` | EFER.LME did not take effect after the MSR write |
+| `Z-OS STAGE2 LONG MODE ERROR 6` | CPU reports no long mode support through CPUID |
+| `Z-OS STAGE2 LONG MODE ERROR 7` | CR4.PAE did not read back as set |
 
 Each message ends with `HALT` and the CPU stops with interrupts disabled, so
 the failure is visible on screen instead of producing a reset loop.

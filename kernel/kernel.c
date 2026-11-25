@@ -39,6 +39,13 @@ void kmain(struct boot_info *boot) {
     }
     kprintf("BootInfo at %p, memory map entries: %u\n", boot, boot->entry_count);
 
+    u64 efer = read_msr(0xC0000080);
+    u64 cr4 = read_cr4();
+    if ((efer & 0x100) == 0 || (cr4 & 0x20) == 0) {
+        panic("long mode state is invalid");
+    }
+    kprintf("Long mode: EFER.LME verified, CR4.PAE verified\n");
+
     gdt_init();
     interrupts_init();
     kprintf("GDT, TSS, IDT, and PIC initialized\n");

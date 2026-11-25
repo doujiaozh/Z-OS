@@ -170,13 +170,17 @@ protected_entry:
     add edi, 8
     loop .map
 
+    call check_long_mode
     call validate_paging
     mov eax, cr4
     or eax, 0x20
     mov cr4, eax
+    mov eax, cr4
+    test eax, 0x20
+    jz .pae_error
     mov ecx, 0xC0000080
     rdmsr
-    or eax, 0x100
+    bts eax, 8
     wrmsr
     mov ecx, 0xC0000080
     rdmsr
@@ -190,6 +194,27 @@ protected_entry:
     mov eax, 0x1000
     mov cr3, eax
     jmp 0x18:long_entry
+.pae_error:
+    mov bl, '7'
+    mov esi, long_mode_error_text
+    mov ecx, long_mode_error_text_length
+    jmp report_error
+
+check_long_mode:
+    mov eax, 0x80000000
+    cpuid
+    cmp eax, 0x80000001
+    jb .unsupported
+    mov eax, 0x80000001
+    cpuid
+    test edx, 0x20000000
+    jz .unsupported
+    ret
+.unsupported:
+    mov bl, '6'
+    mov esi, long_mode_error_text
+    mov ecx, long_mode_error_text_length
+    jmp report_error
 
 validate_paging:
     mov edi, 0x1000

@@ -67,6 +67,16 @@ static inline void irq_restore(u64 flags) {
     }
 }
 
+static inline u64 read_cr4(void) {
+    u64 value;
+    __asm__ volatile("mov %%cr4, %0" : "=r"(value));
+    return value;
+}
+
+static inline void write_cr4(u64 value) {
+    __asm__ volatile("mov %0, %%cr4" : : "r"(value) : "memory");
+}
+
 static inline u64 read_cr3(void) {
     u64 value;
     __asm__ volatile("mov %%cr3, %0" : "=r"(value));

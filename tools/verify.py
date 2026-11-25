@@ -406,8 +406,8 @@ def run_bootcheck():
     print("image integrity PASS")
 
     targets = [
-        ("z-os.img", ["Z-OS", "Boot complete. Starting shell.", "z-os:"], 25, True),
-        ("z-os-test.img", ["Z-OS", "ZTEST BEGIN"], 40, False),
+        ("z-os.img", ["Z-OS", "EFER.LME verified", "Boot complete. Starting shell.", "z-os:"], 25, True),
+        ("z-os-test.img", ["Z-OS", "EFER.LME verified", "ZTEST BEGIN"], 40, False),
     ]
     for image_name, markers, deadline_seconds, expect_prompt in targets:
         serial_path = BUILD / (image_name.replace(".", "_") + ".serial.log")
@@ -458,6 +458,8 @@ def run_bootcheck():
                     raise CheckFailure(image_name + " vga screen does not show the kernel banner")
                 if "z-os" not in vga_text:
                     raise CheckFailure(image_name + " vga screen does not show the shell prompt")
+                if "EFER.LME" not in vga_text:
+                    raise CheckFailure(image_name + " vga screen does not show the long mode report")
             print(image_name + " boot trace clean, serial and vga markers found")
         finally:
             if process.poll() is None:

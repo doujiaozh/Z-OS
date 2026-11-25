@@ -37,6 +37,8 @@ Implemented and verified:
 
 - BIOS floppy boot with a 32-sector second stage and a fixed 320 KiB kernel slot.
 - Long-mode kernel at 1 MiB with its own GDT, TSS, IDT, and page tables.
+- Loader long-mode entry validated by CPUID, CR4.PAE readback, EFER.LME
+  readback, and a second check inside the 64-bit kernel.
 - Shared kernel high-half direct map at 0xFFFFFFFF80000000 for all processes.
 - VGA text console and 115200-baud COM1 serial mirror.
 - PIT timer interrupts at 100 Hz and a preemptive round-robin kernel scheduler.

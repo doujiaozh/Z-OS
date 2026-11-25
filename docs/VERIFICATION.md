@@ -150,16 +150,27 @@ The boot fault check verifies image integrity and early boot robustness:
   digest is compared with the digest recorded in `build/manifest.json`, which
   detects a stale or foreign image that was not produced by the current build.
 - Each image is booted headless with QEMU tracing `int,cpu_reset,guest_errors`.
-- The normal image must print the Z-OS banner, the boot completion line, and
-  the shell prompt.
-- The self-test image must print the banner and `ZTEST BEGIN`.
+- Both images must print the Z-OS banner, the kernel long-mode confirmation
+  line (`EFER.LME verified`), and their respective boot markers.
+- The normal image must also print the boot completion line and the shell
+  prompt.
+- The self-test image must also print `ZTEST BEGIN`.
 - The trace must contain zero `Triple fault` records and zero page-fault
   exceptions (`v=0e`).
 - The VGA text buffer is read through the QEMU monitor command `xp` and decoded
-  into screen text. The normal image must show the kernel banner and the shell
-  prompt on screen, and neither image may show `PAGING ERROR` or
-  `LONG MODE ERROR`, so a loader diagnostic cannot hide behind a serial-only
-  check.
+  into screen text. The normal image must show the kernel banner, the long-mode
+  confirmation line, and the shell prompt on screen, and neither image may show
+  `PAGING ERROR` or `LONG MODE ERROR`, so a loader diagnostic cannot hide behind
+  a serial-only check.
+
+Additional manual verification performed for the long-mode entry sequence:
+
+- Boot matrix across 128M, 256M, 512M, 1G, and 2G guest memory: shell reached,
+  no loader error on screen, long-mode line present.
+- Boot with `-cpu qemu64`: shell reached, no loader error.
+- Negative test with `-cpu qemu32`, which lacks long mode: the loader prints
+  `Z-OS STAGE2 LONG MODE ERROR 6 HALT` on screen and halts with no triple
+  fault, confirming the CPUID gate and the coded diagnostic path.
 
 This stage exists because an early paging or loader failure otherwise shows up
 only as a reset loop. It is part of the `all` stage and can be run alone with
