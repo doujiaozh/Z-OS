@@ -634,10 +634,55 @@ def run_storage():
     print("storage persistence PASS")
 
 
+def read_ppm(path):
+    data = Path(path).read_bytes()
+    if not data.startswith(b"P6"):
+        raise CheckFailure("screendump is not a binary PPM file: " + str(path))
+    fields = []
+    index = 2
+    while len(fields) < 3:
+        while index < len(data) and data[index:index + 1].isspace():
+            index += 1
+        if data[index:index + 1] == b"#":
+            while index < len(data) and data[index:index + 1] != b"\n":
+                index += 1
+            continue
+        start = index
+        while index < len(data) and not data[index:index + 1].isspace():
+            index += 1
+        fields.append(int(data[start:index]))
+    index += 1
+    width, height, maximum = fields
+    if maximum != 255:
+        raise CheckFailure("screendump maximum channel value is not 255")
+    pixels = data[index:index + width * height * 3]
+    if len(pixels) != width * height * 3:
+        raise CheckFailure("screendump pixel payload is truncated")
+    return width, height, pixels
+
+
+def ppm_pixel(ppm, x, y):
+    width, height, pixels = ppm
+    if x < 0 or y < 0 or x >= width or y >= height:
+        raise CheckFailure("pixel coordinate outside the screendump")
+    offset = (y * width + x) * 3
+    return (pixels[offset], pixels[offset + 1], pixels[offset + 2])
+
+
+def ppm_count_color(ppm, color):
+    width, height, pixels = ppm
+    target = bytes(color)
+    count = 0
+    total = width * height
+    for index in range(total):
+        offset = index * 3
+        if pixels[offset:offset + 3] == target:
+            count += 1
+    return count
+
+
 def run_gui():
     print("== gui desktop test ==")
-    from PIL import Image
-
     qemu = find_qemu()
     port = free_port()
     monitor_port = free_port()
@@ -671,13 +716,13 @@ def run_gui():
         time.sleep(0.5)
         shot = BUILD / "gui-desktop.ppm"
         monitor.screendump(shot)
-        image = Image.open(shot).convert("RGB")
-        if image.size != (800, 600):
-            raise CheckFailure("gui desktop resolution is " + str(image.size))
-        status_pixel = image.getpixel((5, 5))
-        taskbar_pixel = image.getpixel((5, 590))
-        wallpaper_pixel = image.getpixel((400, 300))
-        icon_pixel = image.getpixel((30, 55))
+        ppm = read_ppm(shot)
+        if (ppm[0], ppm[1]) != (800, 600):
+            raise CheckFailure("gui desktop resolution is " + str((ppm[0], ppm[1])))
+        status_pixel = ppm_pixel(ppm, 5, 5)
+        taskbar_pixel = ppm_pixel(ppm, 5, 590)
+        wallpaper_pixel = ppm_pixel(ppm, 400, 300)
+        icon_pixel = ppm_pixel(ppm, 30, 55)
         if status_pixel != (0x20, 0x30, 0x40):
             raise CheckFailure("gui status bar pixel mismatch: " + str(status_pixel))
         if taskbar_pixel != (0x1B, 0x24, 0x30):
@@ -691,9 +736,8 @@ def run_gui():
         time.sleep(0.5)
         shot_window = BUILD / "gui-window.ppm"
         monitor.screendump(shot_window)
-        window_image = Image.open(shot_window).convert("RGB")
-        colors = window_image.getcolors(maxcolors=1000000)
-        title_pixels = sum(count for count, color in colors if color == (0x2F, 0x6F, 0xB5))
+        window_ppm = read_ppm(shot_window)
+        title_pixels = ppm_count_color(window_ppm, (0x2F, 0x6F, 0xB5))
         if title_pixels < 500:
             raise CheckFailure("gui window title bar is not rendered")
         session.send_line("exit")
