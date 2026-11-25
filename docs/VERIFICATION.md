@@ -4,7 +4,8 @@
 
 | Item | Value |
 | --- | --- |
-| Date | 2026-11-24 |
+| Date | 2026-11-25 |
+| Version | 0.2.0 ELF |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -42,23 +43,24 @@ The build produces:
 - `build/z-os.img`
 - `build/z-os-test.img`
 - `build/z-os.elf`
+- `build/user_init.elf`
 - `build/manifest.json`
 
-The loader enforces a 320 KiB kernel slot. The Foundation kernel occupies
-approximately 49 KiB of the slot, leaving room for additional subsystems. The
-image is zero-padded to 1,474,560 bytes. SHA-256 hashes are written to
-`build/manifest.json` after every build.
+The loader enforces a 320 KiB kernel slot. The 0.2.0 kernel occupies
+approximately 59 KiB of the slot, leaving room for additional subsystems. The
+image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and the
+user ELF are written to `build/manifest.json` after every build.
 
 ## Self-test result
 
-The self-test image executes 43 checks and exits QEMU through the ISA debug
+The self-test image executes 49 checks and exits QEMU through the ISA debug
 exit device. A successful run returns host exit status 33, which is
 `(0x10 << 1) | 1`. A failure returns 35.
 
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=43 failed=0
+ZTEST SUMMARY passed=49 failed=0
 ZTEST RESULT PASS
 ```
 
@@ -74,15 +76,18 @@ Test coverage by area:
 | Formatting | Integers, hexadecimal, zero padding, truncation, trim |
 | Time | RTC field sanity, timer progress across a sleep |
 | Scheduler | Thread creation, preemptive completion, atomic counter correctness |
-| User mode | Ring-3 entry, write syscall, exit syscall, return to kernel |
+| ELF64 | Embedded image validation, entry and segments, bad magic, truncation, W^X rejection, address range rejection |
+| User mode | Ring-3 C program, syscall write, syscall exit, return to kernel |
 
 The user-mode portion produces the following serial output:
 
 ```text
-User: mapped code at 0x40000000 and stack at 0x40001000
+User: loaded ELF64 entry 0x40000000 with 2 segments, stack 0x40010000
 User: entering ring 3
 Hello from Z-OS ring 3
 User syscall return path verified
+C ELF64 user program checksum verified
+ELF64 BSS zero check verified
 ```
 
 ## Boot smoke test
@@ -130,8 +135,9 @@ the shell over COM1. The following commands and properties are checked:
 - `uptime` advances.
 - `ps` shows the init and shell threads.
 - `rand` produces random bytes.
-- `usertest` enters ring 3, prints the expected messages, and exits with
-  status 0.
+- `usertest` validates the embedded ELF, loads text and data pages, enters
+  Ring 3, verifies a checksum and zeroed BSS, and exits with status 0.
+- The shell reports `user program exited with status 0`.
 - `cat /README` reads the boot filesystem image.
 - `shutdown` issues the ACPI PM1a power request and makes QEMU exit with
   status 0.
@@ -173,6 +179,9 @@ rebuilds first unless `--skip-build` is supplied.
 
 - Physical hardware.
 - SMP, APIC, or multi-core interrupt behavior.
+- Per-process address spaces, multiple user processes, `fork`, `exec`, `wait`,
+  signals, or a file-descriptor table.
+- Static PIE relocation, dynamic linking, libc, argv, or environment strings.
 - Long-running stability beyond the boot tests.
 - Disk persistence, networking, USB, audio, graphics acceleration, or GPU.
 - Windows, Linux, or macOS binary compatibility.
@@ -181,4 +190,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing Foundation test run.
+passing 0.2.0 test run.

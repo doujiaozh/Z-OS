@@ -1,5 +1,6 @@
 #include "user.h"
 #include "console.h"
+#include "elf.h"
 #include "gdt.h"
 #include "io.h"
 #include "lib.h"
@@ -8,18 +9,16 @@
 #include "thread.h"
 #include "vmm.h"
 
-#define USER_CODE_BASE 0x40000000ULL
-#define USER_STACK_BASE 0x40001000ULL
-#define USER_STACK_TOP 0x40002000ULL
+#define USER_STACK_BASE 0x40010000ULL
+#define USER_STACK_TOP 0x40010FF8ULL
 
-extern u8 user_program_start[];
-extern u8 user_program_end[];
 extern void user_enter_and_wait(u64 entry, u64 stack);
 extern void user_exit_to_kernel(void) __attribute__((noreturn));
 
 static bool user_prepared = false;
 static bool user_active = false;
 static volatile u64 user_exit_code = 0;
+static u64 user_entry = 0;
 static u8 user_interrupt_stack[16384] aligned(16);
 
 static int prepare_user_memory(void) {
@@ -27,34 +26,31 @@ static int prepare_user_memory(void) {
         return 0;
     }
     u64 program_size = (u64)(user_program_end - user_program_start);
-    if (program_size == 0 || program_size > PAGE_SIZE) {
+    u64 validated_entry = 0;
+    u32 segments = 0;
+    int result = elf_validate(user_program_start, program_size, &validated_entry, &segments);
+    if (result != ELF_OK) {
+        kprintf("User: ELF validation failed (%d)\n", result);
         return -1;
     }
-    u64 code_frame = pmm_alloc_frame();
     u64 stack_frame = pmm_alloc_frame();
-    if (code_frame == 0 || stack_frame == 0) {
-        if (code_frame != 0) {
-            pmm_free_frame(code_frame);
-        }
-        if (stack_frame != 0) {
-            pmm_free_frame(stack_frame);
-        }
+    if (stack_frame == 0) {
         return -2;
     }
-    memcpy((void *)code_frame, user_program_start, (usize)program_size);
-    if (vmm_map_page(USER_CODE_BASE, code_frame, PTE_PRESENT | PTE_USER) != 0) {
-        pmm_free_frame(code_frame);
+    if (vmm_map_page(USER_STACK_BASE, stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER) != 0) {
         pmm_free_frame(stack_frame);
         return -3;
     }
-    if (vmm_map_page(USER_STACK_BASE, stack_frame, PTE_PRESENT | PTE_WRITABLE | PTE_USER) != 0) {
-        vmm_unmap_page(USER_CODE_BASE);
-        pmm_free_frame(code_frame);
+    result = elf_load(user_program_start, program_size, &user_entry);
+    if (result != ELF_OK) {
+        vmm_unmap_page(USER_STACK_BASE);
         pmm_free_frame(stack_frame);
-        return -3;
+        kprintf("User: ELF load failed (%d)\n", result);
+        return -4;
     }
     user_prepared = true;
-    kprintf("User: mapped code at %p and stack at %p\n", (void *)USER_CODE_BASE, (void *)USER_STACK_BASE);
+    kprintf("User: loaded ELF64 entry %p with %u segments, stack %p\n",
+            (void *)user_entry, segments, (void *)USER_STACK_BASE);
     return 0;
 }
 
@@ -72,7 +68,7 @@ int user_run_demo(u64 *exit_code) {
     u64 previous_stack = tss_get_rsp0();
     tss_set_rsp0((u64)user_interrupt_stack + sizeof(user_interrupt_stack));
     kprintf("User: entering ring 3\n");
-    user_enter_and_wait(USER_CODE_BASE, USER_STACK_TOP);
+    user_enter_and_wait(user_entry, USER_STACK_TOP);
     tss_set_rsp0(previous_stack);
     sched_preempt_enable();
     interrupts_enable();

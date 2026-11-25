@@ -304,7 +304,7 @@ void vfs_init(void) {
     create_child_unlocked(dev, "null", VFS_TYPE_DEVICE, VFS_DEVICE_NULL);
     create_child_unlocked(dev, "console", VFS_TYPE_DEVICE, VFS_DEVICE_CONSOLE);
     create_child_unlocked(dev, "random", VFS_TYPE_DEVICE, VFS_DEVICE_RANDOM);
-    initialize_file("/README", "Z-OS is a small 64-bit operating system.\n\nThis image boots through a two-stage BIOS loader into a preemptive\nkernel with virtual memory, a kernel heap, ring-3 syscalls, a VFS\nand an in-memory filesystem.\n\nType help to list shell commands.\n");
+    initialize_file("/README", "Z-OS is a small 64-bit operating system.\n\nThis image boots through a two-stage BIOS loader into a preemptive\nkernel with virtual memory, a kernel heap, a static ELF64 loader,\nring-3 syscalls, a VFS, and an in-memory filesystem.\n\nType help to list shell commands.\n");
     initialize_file("/etc/motd", "Welcome to Z-OS.\n");
     initialize_file("/etc/version", Z_OS_VERSION "\n");
     initialize_file("/home/welcome", "This home directory lives in ramfs.\n");

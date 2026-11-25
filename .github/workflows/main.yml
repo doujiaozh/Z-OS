@@ -34,6 +34,8 @@ jobs:
           path: |
             build/z-os.img
             build/z-os-test.img
+            build/z-os.elf
+            build/user_init.elf
             build/manifest.json
             build/selftest.log
             build/smoke.log

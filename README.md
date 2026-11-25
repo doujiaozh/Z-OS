@@ -14,7 +14,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 0.1.0, codename Foundation. Development quality. Not production ready.
+Version 0.2.0, codename ELF. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -24,9 +24,9 @@ Version 0.1.0, codename Foundation. Development quality. Not production ready.
 | Memory | E820 physical frame bitmap, 4-level paging, 8 MiB kernel heap |
 | Scheduling | Preemptive round-robin kernel threads, sleep, yield, reaping |
 | Filesystem | In-memory VFS and ramfs, 128 nodes, 1 MiB maximum file size |
-| User mode | Ring-3 embedded program, TSS kernel stack, `int 0x80` syscalls |
+| User mode | Ring-3 static ELF64 C program, TSS kernel stack, `int 0x80` syscalls |
 | Shell | Directory and file commands, system information, user-mode launcher |
-| Verification | 43 in-kernel tests, boot smoke test, interactive shell test |
+| Verification | 49 in-kernel tests, boot smoke test, interactive shell test |
 
 Implemented and verified:
 
@@ -41,7 +41,8 @@ Implemented and verified:
 - RTC date and time through CMOS.
 - VFS with files, directories, rename, removal, path resolution, and devices.
 - Ramfs with `/README`, `/etc`, `/home`, `/tmp`, `/dev/null`, `/dev/console`, and `/dev/random`.
-- Ring-3 execution, `int 0x80`, and syscalls `write`, `exit`, `getpid`, `uptime`, and `yield`.
+- Static ELF64 loader with header, program-header, bounds, overlap, and W^X validation.
+- Ring-3 static C program, `int 0x80`, and syscalls `write`, `exit`, `getpid`, `uptime`, and `yield`.
 - Shell commands for filesystem work, diagnostics, scheduling, user mode, and power.
 - ACPI PM1a shutdown path for QEMU and compatible chipsets.
 - QEMU self-test image with machine-checkable pass or fail exit status.
@@ -51,7 +52,8 @@ Implemented and verified:
 Not implemented yet:
 
 - SMP, APIC, ACPI table parsing, and per-CPU scheduling.
-- Per-process address spaces, ELF loading, `fork`, `exec`, `wait`, signals, and a POSIX ABI.
+- Per-process address spaces, `fork`, `exec`, `wait`, signals, and a POSIX ABI.
+- Dynamic ELF loading, PIE relocation, shared libraries, and a user-space C library.
 - Persistent disks, block cache, journaling filesystem, permissions, and mount points.
 - Networking, sockets, USB, audio, GPU acceleration, and a graphical compositor.
 - Windows PE and Win32 compatibility, Linux ABI compatibility, or Mach-O support.
@@ -91,6 +93,7 @@ Artifacts:
 - `build/z-os.img`: normal boot image
 - `build/z-os-test.img`: kernel self-test image
 - `build/z-os.elf`: kernel ELF with debug symbols
+- `build/user_init.elf`: static ELF64 user program
 - `build/manifest.json`: sizes and SHA-256 hashes
 
 The image is a 1.44 MiB floppy image. The loader is tied to the standard
@@ -106,7 +109,7 @@ qemu-system-x86_64 -m 256M -drive format=raw,file=build/z-os.img,if=floppy -boot
 
 Windows example:
 
-```powershell
+```bat
 D:\QEMU\qemu-system-x86_64.exe -m 256M -drive format=raw,file=build/z-os.img,if=floppy -boot a
 ```
 
@@ -136,21 +139,49 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 43 in-kernel checks covering physical memory,
+The self-test image runs 49 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
-and the ring-3 syscall round trip. It then exits QEMU through the ISA debug
-exit device, so the harness can validate a machine-readable result rather
-than a screenshot.
+ELF64 validation, and the ring-3 syscall round trip. It then exits QEMU
+through the ISA debug exit device, so the harness can validate a
+machine-readable result rather than a screenshot.
 
 The keyboard check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a
 TCP serial backend, runs shell commands, and verifies file creation, reads,
-appends, renames, copies, metadata, hexdumps, memory, scheduling, ring-3
+appends, renames, copies, metadata, hexdumps, memory, scheduling, ELF64
 execution, cleanup, and ACPI shutdown.
 
 Verified environment: QEMU 7.0.0 on Windows, 256 MiB RAM, default `pc`
 machine and SeaBIOS. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
+
+## ELF64 user program
+
+`user/init.c` is a freestanding C program compiled with Clang and linked by
+LLD at 0x40000000. It uses only the Z-OS syscall ABI and has no hosted C
+library. The linker produces two PT_LOAD segments: read-execute text and
+read-write data with BSS.
+
+The kernel embeds the complete ELF64 executable in its rodata. On `usertest`,
+the ELF loader validates the header and every PT_LOAD program header, rejects
+out-of-range addresses, overlapping pages, and writable-executable segments,
+copies file-backed bytes into freshly allocated frames, zeroes BSS, maps
+read-only segments without write permission, maps writable segments with
+permission, and enters Ring 3 at `e_entry`.
+
+The current loader accepts only static `ET_EXEC` images with page-aligned,
+non-overlapping PT_LOAD segments inside 0x40000000 to 0x4000FFFF. It does not
+support PIE relocation, dynamic linking, argv, or environment strings.
+
+```text
+User: loaded ELF64 entry 0x40000000 with 2 segments, stack 0x40010000
+User: entering ring 3
+Hello from Z-OS ring 3
+User syscall return path verified
+C ELF64 user program checksum verified
+ELF64 BSS zero check verified
+user program exited with status 0
+```
 
 ## Shell
 
@@ -181,7 +212,7 @@ for the shell but history navigation is not implemented yet.
 boot/          BIOS stage 1, stage 2, and loader constants
 kernel/        freestanding C and NASM kernel
   arch/        entry, GDT, IDT stubs, context switch, user transition
-  cpu/         GDT, IDT, PIC, syscalls, power
+  cpu/         GDT, IDT, PIC, ELF64 loader, syscalls, power
   drivers/     console, serial, keyboard, input queue, PIT, RTC
   fs/          VFS and ramfs
   include/     kernel interfaces
@@ -189,7 +220,7 @@ kernel/        freestanding C and NASM kernel
   mm/          physical memory, paging, heap
   sched/       preemptive thread scheduler
   shell/       interactive shell
-user/          embedded ring-3 demo program
+user/          static ELF64 C user program and linker script
 tools/         build and verification automation
 docs/          architecture, roadmap, verification
 ```

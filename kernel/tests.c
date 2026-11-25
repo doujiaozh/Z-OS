@@ -1,5 +1,6 @@
 #include "tests.h"
 #include "console.h"
+#include "elf.h"
 #include "heap.h"
 #include "input.h"
 #include "io.h"
@@ -196,6 +197,41 @@ static void test_user_mode(void) {
     check(result == 0 && exit_code == 0, "ring-3 user program exits through syscall");
 }
 
+static void test_elf(void) {
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    u64 entry = 0;
+    u32 segments = 0;
+    int result = elf_validate(user_program_start, image_size, &entry, &segments);
+    check(result == ELF_OK, "elf validates embedded user image");
+    check(result == ELF_OK && entry >= ELF_USER_BASE && entry < ELF_USER_LIMIT && segments >= 2,
+          "elf entry point and segments are valid");
+    u8 bad_header[sizeof(struct elf64_header)];
+    memcpy(bad_header, user_program_start, sizeof(bad_header));
+    bad_header[0] = 0;
+    check(elf_validate(bad_header, sizeof(bad_header), NULL, NULL) == ELF_ERROR_INVALID,
+          "elf rejects bad magic");
+    check(elf_validate(user_program_start, sizeof(struct elf64_header) - 1, NULL, NULL) == ELF_ERROR_INVALID,
+          "elf rejects truncated header");
+    u8 *mutated = kmalloc((usize)image_size);
+    if (mutated == NULL) {
+        check(false, "elf rejects writable executable segment");
+        check(false, "elf rejects out-of-range segment");
+        return;
+    }
+    memcpy(mutated, user_program_start, (usize)image_size);
+    struct elf64_header *mutated_header = (struct elf64_header *)mutated;
+    struct elf64_program_header *mutated_program =
+        (struct elf64_program_header *)(mutated + mutated_header->program_offset);
+    mutated_program->flags = ELF_FLAG_READ | ELF_FLAG_WRITE | ELF_FLAG_EXECUTE;
+    check(elf_validate(mutated, image_size, NULL, NULL) == ELF_ERROR_FLAGS,
+          "elf rejects writable executable segment");
+    mutated_program->flags = ELF_FLAG_READ | ELF_FLAG_EXECUTE;
+    mutated_program->virtual_address = 0x50000000ULL;
+    check(elf_validate(mutated, image_size, NULL, NULL) == ELF_ERROR_RANGE,
+          "elf rejects out-of-range segment");
+    kfree(mutated);
+}
+
 void selftest_thread(void *argument) {
     (void)argument;
     kprintf("ZTEST BEGIN\n");
@@ -204,6 +240,7 @@ void selftest_thread(void *argument) {
     test_formatting();
     test_time();
     test_threads();
+    test_elf();
     test_user_mode();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {

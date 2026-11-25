@@ -3,28 +3,35 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.1.0 Foundation. It is deliberately conservative. The system is a development
+0.2.0 ELF. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
 
-- The kernel executes in ring 0. The demo program executes in ring 3.
-- User code and user stack pages are mapped with the user bit at every page
-  table level. Kernel text, data, heap, stacks, and page tables are mapped
+- The kernel executes in ring 0. The static ELF64 C program executes in ring 3.
+- User ELF segments and the user stack are mapped with the user bit at every
+  page table level. Kernel text, data, heap, stacks, and page tables are mapped
   supervisor-only.
+- The static ELF loader validates magic, class, endianness, type, machine,
+  header sizes, program-header bounds, segment bounds, address range, overlap,
+  alignment, and segment flags before mapping.
+- The loader rejects every segment that requests both write and execute. Text
+  segments are mapped without write permission; writable data segments retain
+  write permission.
 - The syscall gate has DPL 3. All other IDT gates have DPL 0.
 - The TSS provides a dedicated ring-0 stack for interrupts and syscalls that
   arrive while the CPU is in ring 3.
 - Syscall buffer arguments are validated page by page with
   `vmm_user_range_valid` before the kernel copies or prints from them.
 - Syscall write lengths are capped at 4096 bytes.
-- The user code page is mapped read-only. The user stack is writable and not
-  executable by policy, though NX is not enabled.
+- The user stack is writable. The loader maps only the program's declared
+  segments and a single stack page, so the user cannot map over the kernel.
 - The I/O privilege level is zero. Ring-3 code cannot execute `IN`, `OUT`,
   `CLI`, `STI`, `HLT`, or privileged control-register instructions.
 - A ring-3 exception is reported and converted into a user-mode failure
   return instead of panicking the kernel.
-- Physical frames returned by the allocator are zeroed.
+- Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
+  zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
 - QEMU's debug-exit port is used only by the self-test image and only by the
   self-test thread.
@@ -33,16 +40,20 @@ prototype and must not be used to protect sensitive data.
 
 ### Address-space isolation
 
-There is one synchronous user demo. It shares the kernel page tables rather
-than owning a per-process address space. Once the demo returns, the user page
-table entries remain present. There is no process table, so a future process
-model must replace this shared layout before untrusted workloads can run.
+There is one synchronous user program, loaded from an embedded static ELF64
+image. It shares the kernel page tables rather than owning a per-process
+address space. Once the program returns, its user page table entries remain
+present. There is no process table, so a future process model must replace
+this shared layout before untrusted workloads can run.
 
 ### No executable protection
 
 NX is not enabled. The kernel identity mappings and heap are executable.
-SMEP and SMAP are not enabled, so the kernel does not prevent itself from
-executing or accessing user pages. W^X is not enforced.
+Writable user data pages and the user stack are executable by hardware even
+though the ELF loader rejects W+X segments and maps text without write
+permission. SMEP and SMAP are not enabled, so the kernel does not prevent
+itself from executing or accessing user pages. W^X is enforced only at ELF
+load time, not by page-table NX bits.
 
 ### No kernel hardening
 
@@ -96,7 +107,10 @@ executing or accessing user pages. W^X is not enforced.
 
 ### User-mode limits
 
-- The embedded demo uses fixed virtual addresses.
+- The synchronous ELF64 program uses fixed virtual addresses.
+- The loader accepts only static page-aligned `ET_EXEC` images in a fixed
+  64 KiB window. PIE relocation, dynamic linking, argv, envp, and auxiliary
+  vectors are not implemented.
 - There is no ASLR, stack protector, RELRO, or dynamic linker.
 - There are no file descriptors, so a future POSIX layer must add descriptor
   validation and lifetime rules.
@@ -114,8 +128,9 @@ The current model assumes:
 - There is no network, disk, or multi-user access.
 - Availability attacks by ring-0 code or by the operator are out of scope.
 
-Within that model, the ring transition, user/supervisor page bits, syscall
-pointer validation, and exception containment are implemented and tested.
+Within that model, the ring transition, user/supervisor page bits, ELF
+validation, syscall pointer validation, and exception containment are
+implemented and tested.
 
 ## Hardening priorities
 

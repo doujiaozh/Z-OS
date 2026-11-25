@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.1.0 implementation as it exists in this
+This document describes the Z-OS 0.2.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.1.0:
+Non-goals for 0.2.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -124,8 +124,8 @@ BSS. It never allocates a frame above the boot identity map.
 | Range | Use |
 | --- | --- |
 | 0x0000000000000000 to 0x000000003FFFFFFF | Identity map of physical memory |
-| 0x0000000040000000 | Ring-3 code page |
-| 0x0000000040001000 | Ring-3 stack page |
+| 0x0000000040000000 to 0x000000004000FFFF | Static ELF64 segment window |
+| 0x0000000040010000 to 0x0000000040010FFF | Ring-3 stack |
 | 0x0000000050000000 | Self-test scratch mapping |
 | 0x0000000060000000 to 0x00000000607FFFFF | 8 MiB kernel heap |
 | 0x0000000070000000 | Self-test scratch mapping |
@@ -238,26 +238,57 @@ Limitations: no permissions, ownership, timestamps beyond creation ticks, hard
 links, symbolic links, mount points, page cache, journaling, persistent
 backing store, or fine-grained locking.
 
-## User mode and syscalls
+## User mode and ELF64 loading
 
-The embedded ring-3 program is at `user/hello.asm`. It is assembled as a flat
-binary, embedded in the kernel's rodata through `user/program.asm`, and copied
-to a user page at first use.
+The user program is `user/init.c`, a freestanding C program with no hosted
+library. The build compiles it with Clang, links it at 0x40000000 with
+`user/user.ld`, and embeds the complete static ELF64 image in the kernel's
+rodata through `user/program.asm`.
+
+The linker emits two PT_LOAD segments:
+
+| Segment | Flags | Virtual range | Contents |
+| --- | --- | --- | --- |
+| Text | read, execute | 0x40000000 plus image size | code and rodata |
+| Data | read, write | starts at 0x40001000 | data and BSS |
+
+`kernel/cpu/elf.c` implements a static `ET_EXEC` loader for x86_64 images.
+Validation checks:
+
+- ELF magic, class 64, little-endian data, version, and OS ABI.
+- `ET_EXEC`, `EM_X86_64`, header sizes, program-header size, and count.
+- Program-header table bounds within the embedded image.
+- PT_LOAD file ranges within the image and `p_filesz <= p_memsz`.
+- Virtual ranges inside 0x40000000 to 0x40010000 without overflow.
+- Page-aligned virtual addresses and page or smaller alignment metadata.
+- Readable, non-writable-executable segment flags.
+- No duplicate virtual pages across segments.
+- `e_entry` inside an executable segment.
+
+The loader copies file-backed bytes into newly allocated physical frames
+before mapping. Bytes beyond `p_filesz` remain zero because the PMM zeroes
+frames. Read-only segments are mapped without PTE_WRITABLE; writable segments
+receive the write bit. On failure, all pages mapped by that load are unmapped
+and freed.
+
+The user stack is a separate writable page at 0x40010000. Initial RSP is
+0x40010FF8 so the stack pointer satisfies the x86_64 ABI alignment at a C
+function entry.
 
 Transition sequence:
 
-1. Allocate and map a user code page at 0x40000000 and a user stack page at
-   0x40001000. Code is read-only for ring 3; the stack is writable.
-2. Disable scheduler preemption for the duration of the synchronous demo.
-3. Point TSS.RSP0 at a dedicated 16 KiB interrupt stack.
-4. Load user data selectors and execute `IRETQ` with user CS, SS, RFLAGS.IF,
-   user RIP, and user RSP.
-5. `INT 0x80` enters the kernel through the DPL-3 gate. The CPU switches to
+1. Validate the embedded ELF and report malformed images to the shell.
+2. Map the user stack page and load all ELF PT_LOAD segments.
+3. Disable scheduler preemption for the duration of the synchronous demo.
+4. Point TSS.RSP0 at a dedicated 16 KiB interrupt stack.
+5. Load user data selectors and execute `IRETQ` with user CS, SS, RFLAGS.IF,
+   the ELF entry point, and the user stack.
+6. `INT 0x80` enters the kernel through the DPL-3 gate. The CPU switches to
    TSS.RSP0 and the common stub builds a register frame.
-6. The syscall dispatcher validates user pointers and performs the operation.
-7. `exit` abandons the interrupt frame and restores the pre-demo kernel stack
+7. The syscall dispatcher validates user pointers and performs the operation.
+8. `exit` abandons the interrupt frame and restores the pre-demo kernel stack
    through an assembly return path.
-8. Kernel preemption and the previous TSS.RSP0 are restored.
+9. Kernel preemption and the previous TSS.RSP0 are restored.
 
 Syscall ABI:
 
@@ -275,12 +306,15 @@ limited to 4096 bytes per call.
 
 Important limitations:
 
-- One synchronous user demo, not a general process model.
+- One synchronous user program, not a general process model.
 - The user program shares the kernel's address space. Kernel pages are
   supervisor-only, but there is no per-process isolation yet.
-- No ELF loader, argv/envp, file descriptors, heap, signals, or process table.
-- No NX, SMEP, SMAP, KASLR, or ASLR.
-- User code and stack have fixed virtual addresses.
+- The loader supports only static, page-aligned `ET_EXEC` images in a fixed
+  64 KiB window. There is no PIE relocation, dynamic linking, argv, envp, or
+  auxiliary vector.
+- There is no process table, file-descriptor table, signals, or heap.
+- No NX, SMEP, SMAP, KASLR, or ASLR. The loader rejects W+X segments, but
+  writable pages remain executable because NX is not enabled.
 
 ## Console and shell
 
@@ -317,7 +351,8 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 
 1. Assemble stage 1 and verify it is exactly 512 bytes.
 2. Assemble stage 2 and verify it is exactly 16 KiB.
-3. Assemble the ring-3 demo and its embedding object.
+3. Compile the C user program, link the static ELF64 image, and assemble the
+   embedding object that includes the complete ELF.
 4. Compile every kernel C file twice: normal and with `-DZ_SELFTEST`.
 5. Assemble every kernel NASM file.
 6. Link each kernel ELF with LLD and the kernel linker script.
@@ -341,5 +376,5 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
   compatibility, floppy geometry support, and chipset-specific power control.
 - The kernel assumes exactly one CPU and does not program the local APIC.
 
-These boundaries are intentional for a 0.1.0 foundation and are tracked in
+These boundaries are intentional for a 0.2.0 foundation and are tracked in
 the roadmap.

@@ -4,8 +4,8 @@
 #include "types.h"
 
 #define Z_OS_NAME "Z-OS"
-#define Z_OS_VERSION "0.1.0"
-#define Z_OS_CODENAME "Foundation"
+#define Z_OS_VERSION "0.2.0"
+#define Z_OS_CODENAME "ELF"
 
 struct boot_info;
 

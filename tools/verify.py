@@ -74,7 +74,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST RESULT PASS", "failed=0"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=49 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -287,7 +287,7 @@ def run_shell():
             ("uptime", ["up 0 days"]),
             ("ps", ["shell", "init"]),
             ("rand 8", []),
-            ("usertest", ["Hello from Z-OS ring 3", "status 0"]),
+            ("usertest", ["Hello from Z-OS ring 3", "C ELF64 user program checksum verified", "status 0"]),
             ("cat /README", ["Z-OS is a small 64-bit operating system."]),
         ]
         for command_line, expected in tests:

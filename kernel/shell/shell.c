@@ -200,7 +200,7 @@ static void command_help(void) {
     kprintf("  sleep <ms>           sleep for milliseconds\n");
     kprintf("  history              show command history\n");
     kprintf("  rand [bytes]         print random bytes\n");
-    kprintf("  usertest             enter ring 3 and run the embedded program\n");
+    kprintf("  usertest             load and run the static ELF64 C program\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -208,7 +208,8 @@ static void command_help(void) {
 static void command_about(void) {
     kprintf("Z-OS %s %s\n", Z_OS_VERSION, Z_OS_CODENAME);
     kprintf("A compact x86_64 operating system with a preemptive kernel,\n");
-    kprintf("virtual memory, ramfs, ring-3 syscalls, and a serial console.\n");
+    kprintf("virtual memory, ramfs, static ELF64 loading, ring-3 syscalls,\n");
+    kprintf("and a serial console.\n");
 }
 
 static void command_uname(void) {
@@ -622,10 +623,10 @@ static void command_usertest(void) {
     u64 exit_code = 0;
     int result = user_run_demo(&exit_code);
     if (result != 0) {
-        kprintf("user mode demo failed to start (%d)\n", result);
+        kprintf("user program failed to start (%d)\n", result);
         return;
     }
-    kprintf("user mode demo exited with status %llu\n", exit_code);
+    kprintf("user program exited with status %llu\n", exit_code);
 }
 
 static void execute_command(int argc, char *arguments[]) {

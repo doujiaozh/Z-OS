@@ -9,18 +9,33 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.1.0 is the Foundation stage: it boots, manages memory, runs preemptive
-kernel threads, hosts a VFS and shell, enters ring 3, and verifies itself
-under QEMU. Everything below is future work unless marked implemented.
+Z-OS 0.2.0 is the ELF stage. It boots, manages memory, runs preemptive kernel
+threads, hosts a VFS and shell, loads a static ELF64 C program into Ring 3,
+and verifies itself under QEMU. The process model, persistent storage,
+networking, SMP, and compatibility layers remain future work.
+
+## Phase 1 execution status
+
+| Milestone | Status | Release |
+| --- | --- | --- |
+| Static ELF64 loader and minimal C user program | Implemented and verified | v0.2.0-elf |
+| Per-process page tables and address-space switch | Planned, next | v0.3.0-process |
+| Process table with `fork`, `exec`, `wait`, and `exit` | Planned | Phase 1 |
+| File-descriptor table and syscall expansion | Planned | Phase 1 |
+| Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
+
+Phase 1 begins with the ELF milestone while several Milestone 0.2 hardening
+items remain open. Those hardening items are still tracked below and are not
+claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.1.0 Foundation | Needed for general purpose |
+| Domain | 0.2.0 ELF | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
 | Memory | Frame bitmap, 4-level paging, heap | VMA tracking, demand paging, COW, swap, NUMA, slab allocators |
-| Processes | One synchronous ring-3 demo | ELF loader, process table, fork/exec/wait, signals, credentials |
+| Processes | Static ELF64 loader and one C user program | Per-process address spaces, process table, fork/exec/wait, signals, credentials |
 | Threads | Preemptive kernel round-robin | User threads, priorities, affinity, futexes, real-time classes |
 | VFS | Ramfs, 128 nodes, global lock | Mounts, dcache, inode cache, page cache, permissions, quotas |
 | Storage | None | ATA, NVMe, virtio-blk, partitioning, journaling FS, fsck |
@@ -30,8 +45,8 @@ under QEMU. Everything below is future work unless marked implemented.
 | Power | QEMU-compatible ACPI power request | ACPI parser, S3/S4, thermal, battery, cpufreq, idle governors |
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Five custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
-| Userland | Kernel shell and one demo | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 43 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
+| Reliability | 49 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -58,11 +73,11 @@ Acceptance criteria:
 - All existing tests pass on the QEMU matrix.
 - No compiler warnings under the project warning set.
 - A deliberate kernel fault produces a register dump and stack trace.
-- A deliberate user fault terminates only the user demo.
+- A deliberate user fault terminates only the user program.
 
 ## Milestone 0.3: kernel completeness
 
-Goal: move from a kernel demo environment to a kernel capable of hosting
+Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
@@ -77,9 +92,10 @@ independent processes.
   switching.
 - Enable NX and W^X. Enable SMEP and SMAP after audit.
 - Add KASLR for the kernel image and ASLR for user mappings.
+- Extend the existing static `ET_EXEC` loader with PIE, relocation, argv, and
+  auxiliary-vector support.
 - Add a process table with PID allocation, parentage, credentials, and exit
   status.
-- Add an ELF64 loader for static PIE executables.
 - Add `fork`, `exec`, `wait`, `exit`, `mmap`, `munmap`, `brk`, and signal
   delivery.
 - Add a file-descriptor table and per-process current directory.
@@ -90,7 +106,8 @@ Acceptance criteria:
 - The kernel boots on one to four emulated CPUs.
 - Two independent user processes cannot read or write each other's memory.
 - A faulting process is terminated and reaped without crashing the kernel.
-- A static ELF binary can be loaded from ramfs and run.
+- A static ELF binary can be loaded through the VFS and run in its own
+  address space.
 
 ## Milestone 0.4: POSIX and developer ABI
 
@@ -264,12 +281,12 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Complete 0.2 hardening, especially guard pages, reference counts, and
-   ACPI table parsing.
-2. Replace the fixed QEMU power ports with an FADT-driven shutdown path.
-3. Introduce per-process address spaces and an ELF loader.
-4. Add a kernel/user test harness that runs real binaries.
-5. Move the console to a framebuffer path for hardware independence.
+1. Implement per-process PML4 trees and switch address spaces around Ring 3.
+2. Add a process table and the first `fork`, `exec`, `wait`, and `exit` paths.
+3. Add a file-descriptor table and extend the syscall interface.
+4. Add a kernel/user test harness that runs multiple independent ELF binaries.
+5. Complete the 0.2 hardening backlog: guard pages, reference counts, stack
+   traces, and ACPI table parsing.
 6. Add PCI enumeration and a persistent disk driver.
 7. Build the first user-space init and libc.
 

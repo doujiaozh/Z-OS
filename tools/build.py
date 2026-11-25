@@ -35,6 +35,26 @@ CFLAGS = [
     "-g",
     "-Ikernel/include",
 ]
+USER_CFLAGS = [
+    "--target=x86_64-none-elf",
+    "-std=c11",
+    "-ffreestanding",
+    "-fno-builtin",
+    "-fno-stack-protector",
+    "-fno-pic",
+    "-fno-pie",
+    "-fno-omit-frame-pointer",
+    "-fno-asynchronous-unwind-tables",
+    "-mno-red-zone",
+    "-mcmodel=small",
+    "-mno-mmx",
+    "-mno-sse",
+    "-mno-sse2",
+    "-Wall",
+    "-Wextra",
+    "-Werror",
+    "-O2",
+]
 
 
 def which_tool(name, candidates):
@@ -117,12 +137,23 @@ def build_boot():
 
 
 def build_user():
-    nasm, _, _, _ = tools()
-    flat = BUILD / "user_hello.bin"
-    obj = BUILD / "user_program.o"
-    run([nasm, "-f", "bin", str(ROOT / "user" / "hello.asm"), "-o", str(flat)])
-    run([nasm, "-f", "elf64", "-I", str(BUILD) + os.sep, str(ROOT / "user" / "program.asm"), "-o", str(obj)])
-    return obj
+    nasm, clang, lld, _ = tools()
+    source = ROOT / "user" / "init.c"
+    linker = ROOT / "user" / "user.ld"
+    object_path = BUILD / "user_init.o"
+    elf_path = BUILD / "user_init.elf"
+    embed_path = BUILD / "user_program.o"
+    run([clang] + USER_CFLAGS + ["-c", str(source), "-o", str(object_path)])
+    run([lld, "-m", "elf_x86_64", "-z", "noexecstack", "-T", str(linker), "-o", str(elf_path), str(object_path)])
+    image = elf_path.read_bytes()
+    if len(image) < 64 or image[0:4] != b"\x7fELF" or image[4] != 2 or image[5] != 1:
+        raise SystemExit("user ELF header is invalid")
+    if int.from_bytes(image[16:18], "little") != 2:
+        raise SystemExit("user ELF is not an executable")
+    if int.from_bytes(image[18:20], "little") != 62:
+        raise SystemExit("user ELF is not x86_64")
+    run([nasm, "-f", "elf64", "-I", str(BUILD) + os.sep, str(ROOT / "user" / "program.asm"), "-o", str(embed_path)])
+    return embed_path, elf_path
 
 
 def make_image(kernel_flat, stage1, stage2, name):
@@ -143,7 +174,7 @@ def make_image(kernel_flat, stage1, stage2, name):
 def build():
     clean()
     stage1, stage2 = build_boot()
-    user_obj = build_user()
+    user_obj, user_elf = build_user()
     release = compile_kernel("release", [], [user_obj])
     test = compile_kernel("selftest", ["-DZ_SELFTEST"], [user_obj])
     image = make_image(release, stage1, stage2, "z-os.img")
@@ -154,6 +185,8 @@ def build():
         "image_size": image.stat().st_size,
         "image_sha256": hashlib.sha256(image.read_bytes()).hexdigest(),
         "test_image_sha256": hashlib.sha256(test_image.read_bytes()).hexdigest(),
+        "user_elf_size": user_elf.stat().st_size,
+        "user_elf_sha256": hashlib.sha256(user_elf.read_bytes()).hexdigest(),
         "user_object": str(user_obj.relative_to(ROOT)),
     }
     (BUILD / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
