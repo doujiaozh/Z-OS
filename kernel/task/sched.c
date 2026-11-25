@@ -4,6 +4,7 @@
 #include "io.h"
 #include "lib.h"
 #include "process.h"
+#include "signal.h"
 #include "string.h"
 #include "vmm.h"
 
@@ -129,6 +130,12 @@ u64 sched_interrupt_return(u64 frame_rsp) {
         return 0;
     }
     current->frame_rsp = frame_rsp;
+    if (signal_has_deliverable(&current->signals)) {
+        int action = signal_deliver(current, frame);
+        if (action < 0) {
+            sched_exit_current(0x80U | (u64)(frame->vector & 0x1F));
+        }
+    }
     if (current->state == PROCESS_BLOCKED) {
         struct process *next = process_pick_ready();
         if (next == NULL) {

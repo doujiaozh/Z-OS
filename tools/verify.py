@@ -74,7 +74,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=107 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=194 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -295,6 +295,12 @@ def run_shell():
                           "forktest: parent exit status 0"]),
             ("gfx test", ["gfx: framebuffer 800x600x32", "gfx: window manager composited 2 windows",
                           "gfx: composition verified", "gfx: test complete"]),
+            ("postest", ["postest: posix primitives test started",
+                         "postest: fd, credentials, signals, wait verified",
+                         "postest: exit status 0"]),
+            ("guitest2", ["guitest2: extended graphics test started", "guitest2: font text rendered",
+                          "guitest2: mouse state reported", "guitest2: compositor surface verified",
+                          "font pixels"]),
             ("cat /README", ["Z-OS is a small 64-bit operating system."]),
         ]
         for command_line, expected in tests:

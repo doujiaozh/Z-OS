@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.4.0 Scheduler |
+| Version | 0.5.0 POSIX |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -44,30 +44,32 @@ The build produces:
 - `build/z-os-test.img`
 - `build/z-os.elf`
 - `build/user_init.elf`, `build/user_multi.elf`, `build/user_forktest.elf`,
-  `build/user_guitest.elf`
+  `build/user_guitest.elf`, `build/user_postest.elf`, `build/user_guitest2.elf`
 - `build/manifest.json`
 
-The loader enforces a 320 KiB kernel slot. The 0.4.0 kernel occupies
-approximately 117 KiB of the slot, leaving room for additional subsystems. The
+The loader enforces a 320 KiB kernel slot. The 0.5.0 kernel occupies
+approximately 159 KiB of the slot, leaving room for additional subsystems. The
 image is zero-padded to 1,474,560 bytes. SHA-256 hashes for both images and all
-four user ELF programs are written to `build/manifest.json` after every build.
+six user ELF programs are written to `build/manifest.json` after every build.
 
 ## Self-test result
 
-The self-test image executes 107 checks and exits QEMU through the ISA debug
+The self-test image executes 194 checks and exits QEMU through the ISA debug
 exit device. A successful run returns host exit status 33, which is
 `(0x10 << 1) | 1`. A failure returns 35.
 
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=107 failed=0
+ZTEST SUMMARY passed=194 failed=0
 ZTEST RESULT PASS
 ```
 
-The original 73 checks remain in place. This milestone adds 34 checks covering
-preemptive time slicing, fork continuation, blocking wait, framebuffer VRAM
-access, graphics primitives, window composition, and user graphics output.
+The original 107 checks remain in place. This milestone adds 87 checks
+covering descriptor tables and fork inheritance, credential permission
+matrices, signal state and frame delivery, wait queue expiry and wakeup, font
+glyph rendering, PS/2 mouse packet decoding and cursor save/restore, compositor
+layers and damage, plus two additional user programs.
 
 Test coverage by area:
 
@@ -91,22 +93,31 @@ Test coverage by area:
 | Window manager | Window creation, second window, composition, first and later window drawing, z order, destruction, composition removal, table drain |
 | User graphics | Ring-3 program exit status, real framebuffer pixels after drawing |
 | Display registry | Framebuffer registration, lookup, primary selection, count, unregistration |
+| Descriptors | Standard descriptors, allocation, offset reads, mode rejection, close, dup, table copies, fork inheritance, independent close |
+| Credentials | Root bypass, user init, owner and group grants, other denial, escalation rejection, inheritance, privileged switch |
+| Signals | Empty state, handler install, sigkill rejection, raise, block, unblock, frame redirect, trampoline, counter, pending clear, sigreturn restore |
+| Wait queue | Empty state, blocked registration, infinite deadline, child-exit wake, timed expiry, removal |
+| Font | Blank space glyph, glyph pixels, multi-row bitmap, text width, deterministic rendering, placement difference |
+| Mouse | Driver initialization, relative movement decode, button decode, cursor render, background restore, bounds clamp |
+| Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
+| POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
+| User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
 | User mode | Ring-3 C program under the process scheduler, syscall write, syscall exit, reaping |
 
-The scheduler and graphics tests produce the following serial output:
+The POSIX and extended graphics tests produce the following serial output:
 
 ```text
 multi: process started
-multi: process started
 multi: process finished
-multi: process finished
-forktest: program started
 forktest: fork child resumed at parent code point
 forktest: blocking wait returned child status
-guitest: graphics program started
-guitest: framebuffer info received
-guitest: rectangles drawn to framebuffer
 guitest: pixel readback verified
+postest: posix primitives test started
+postest: fd, credentials, signals, wait verified
+guitest2: extended graphics test started
+guitest2: font text rendered
+guitest2: mouse state reported
+guitest2: compositor surface verified
 ```
 
 The preemption test additionally verifies that the marker trace records both
@@ -168,7 +179,11 @@ the shell over COM1. The following commands and properties are checked:
 - `forktest` runs the fork and blocking wait program and reports the parent
   exit status.
 - `gfx test` enters graphics mode, composes two windows, verifies framebuffer
-  pixels, and restores text mode.
+  pixels, font output, and the cursor, then restores text mode.
+- `postest` runs the POSIX descriptor, credential, signal, and timed wait
+  program and reports its exit status.
+- `guitest2` renders font text into the framebuffer, queries the mouse, and
+  reports the number of lit font pixels.
 - `cat /README` reads the boot filesystem image.
 - `shutdown` issues the ACPI PM1a power request and makes QEMU exit with
   status 0.
@@ -179,7 +194,10 @@ The shell observes the scheduler and graphics lines:
 schedtest: quantum=2 ticks completed=2 preemptions=...
 gfx: framebuffer 800x600x32 at 0xfd000000, surface vram
 gfx: window manager composited 2 windows
+gfx: font pixels 660, cursor rendered
 gfx: composition verified
+postest: fd, credentials, signals, wait verified
+guitest2: program status 0, font pixels 391, framebuffer verified
 ```
 
 The test fails on unexpected panic, exception, or unknown-command output.
@@ -224,7 +242,8 @@ rebuilds first unless `--skip-build` is supplied.
 - POSIX signals, credentials, sessions, or a file-descriptor table.
 - Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
-- Text rendering, mouse input, damage tracking, or a user-space compositor.
+- Mouse event queues, damage-driven redraw, or a user-space compositor client.
+- POSIX ABI conformance, libc, argv/envp, or dynamic linking.
 - The kernel executing from the high-half direct map. The high-half window is
   mapped and tested, while kernel text still executes through the low identity
   window.
@@ -236,4 +255,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.4.0 test run.
+passing 0.5.0 test run.

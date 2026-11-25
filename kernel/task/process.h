@@ -1,6 +1,9 @@
 #ifndef Z_OS_PROCESS_H
 #define Z_OS_PROCESS_H
 
+#include "cred.h"
+#include "fd.h"
+#include "signal.h"
 #include "types.h"
 #include "vmm.h"
 
@@ -45,6 +48,12 @@ struct process {
     u64 context_switches;
     u64 quantum;
     u64 wait_target;
+    u64 wait_deadline_ticks;
+    u64 wait_timeouts;
+    u64 interrupts;
+    struct fd_table fds;
+    struct credentials cred;
+    struct signal_state signals;
     struct process *ready_next;
 };
 
@@ -55,6 +64,10 @@ struct process *process_create(const char *name, u64 parent_pid, const void *ima
 int process_fork_frame(u64 parent_pid, const struct registers *frame, u64 *child_pid);
 int process_exec_current(const void *image, u64 image_size, struct registers *frame);
 void process_mark_zombie(struct process *process, u64 status);
+bool process_has_pending_signal(struct process *process);
+bool process_deliver_signal(struct process *process, struct registers *frame);
+bool process_set_signal(struct process *process, u64 signum, u64 handler, u64 trampoline);
+bool process_raise_signal(u64 pid, u64 signum);
 void process_wake_parent(struct process *child);
 int process_kill(u64 pid, u64 status);
 int process_reap(u64 pid);

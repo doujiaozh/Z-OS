@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.4.0 Scheduler. It is deliberately conservative. The system is a development
+0.5.0 POSIX. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -55,6 +55,26 @@ prototype and must not be used to protect sensitive data.
 - The scheduler rejects batches that reference missing or non-ready processes
   and reports deadlock instead of spinning, so a stuck batch returns control to
   the kernel caller.
+- Descriptor system calls validate every descriptor index against the calling
+  process table and reject reads on write-only descriptors and writes on
+  read-only descriptors. A forked child receives a table copy, so closing a
+  descriptor in the child cannot release the parent descriptor.
+- Path system calls copy user strings one byte at a time with a per-byte user
+  range check, so a string that crosses into an unmapped page is rejected
+  before use.
+- Signal delivery validates the computed user signal frame range against the
+  target address space, refuses to build a frame when the handler or trampoline
+  address is missing, and performs frame writes under the target CR3.
+- `sigreturn` requires a fully mapped 176-byte user context and replaces the
+  interrupt frame from validated user memory.
+- `SIGKILL` and `SIGSTOP` cannot be caught or blocked, so a runaway process
+  remains killable from the kernel side.
+- Wait queue entries are keyed by PID, removed on process exit and reaping, and
+  bounded to 32 entries.
+- Framebuffer text system calls validate the user string byte by byte and cap
+  the text length at 96 characters.
+- Mouse state is read-only for user processes through a single validated
+  structure copy; user code cannot program the PS/2 controller.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -73,6 +93,19 @@ This is not yet a complete process security boundary:
 
 - One CPU, one batch at a time; there is no cross-core isolation to design for
   yet, but also no per-CPU scheduler state.
+- New processes start with root credentials, and `kill` does not check whether
+  the caller owns the target process. Any process can signal any other process
+  in the same batch.
+- VFS nodes store no owner or mode bits, so the credential permission matrix is
+  not yet applied to file operations; descriptors grant access to whatever the
+  path lookup returns.
+- Descriptor tables are fixed at 16 entries with no per-process quota, and
+  descriptor reference counts are not tracked when the same VFS node is opened
+  twice.
+- Signal handler and trampoline addresses are user supplied and only the stack
+  frame range is validated; a process can register any executable address in
+  its own space, which is acceptable for a process-private handler but must be
+  revisited for signal forwarding.
 - Kernel heap mappings are shared and supervisor-only; the kernel heap is not
   per-process.
 - There are no process credentials, file descriptors, sessions, or namespace
@@ -88,7 +121,7 @@ This is not yet a complete process security boundary:
 The kernel and every process share a high-half direct map at
 0xFFFFFFFF80000000 and a supervisor device window at 0xFFFFFFFF40000000. Both
 mappings are identical across address spaces and supervisor-only. The kernel
-still executes from the low identity window in 0.4.0, so this is not yet a
+still executes from the low identity window in 0.5.0, so this is not yet a
 fully relocated higher-half kernel.
 
 Window surfaces live in the kernel heap and are composited by kernel code. They
@@ -152,6 +185,9 @@ load time, not by page-table NX bits.
   sleepable lock.
 - Batch user-process execution suspends kernel-thread scheduling, so user
   processes are the only runnable entities while a batch is active.
+- Signal delivery happens inside the interrupt-return path with interrupts
+  disabled and touches user memory under the target CR3; this is safe on one
+  CPU but needs a copy-first design once multiple CPUs run processes.
 - VFS node pointers have no reference counts. A caller holding a node pointer
   across a concurrent removal would observe freed state.
 - Memory allocation while holding VFS locks can extend interrupt-disabled
@@ -167,6 +203,12 @@ load time, not by page-table NX bits.
   draw over every pixel through the framebuffer system calls.
 - `fb_pixel` lets a process sample screen content, which would be an
   information leak between windows once multiple applications exist.
+- The mouse position, buttons, and cursor are global kernel state. Every
+  process observes the same pointer and any process can redraw the cursor
+  through framebuffer calls.
+- The compositor and window surfaces live in the shared kernel heap and are
+  not mapped into any address space; they are kernel-only structures today,
+  with no user-facing compositor protocol or per-client validation.
 - There is no ASLR, stack protector, RELRO, or dynamic linker.
 - There are no file descriptors or user heap.
 - User buffers are validated and then consumed with interrupts disabled on a
@@ -185,23 +227,26 @@ The current model assumes:
 
 Within that model, the ring transition, per-process user/supervisor page bits,
 ELF validation, syscall pointer validation in the process address space,
-interrupt-frame context switching, fork clone isolation, blocking wait restart,
-framebuffer call validation, process reaping, and exception containment are
-implemented and tested.
+descriptor table isolation across fork, credential permission checks, signal
+frame validation and CR3 switching, blocking wait restart, framebuffer and font
+call validation, mouse packet decoding, compositor layering, process reaping,
+and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. File descriptors, POSIX credentials, sessions, and signals.
-2. NX, W^X, SMEP, SMAP, and UMIP.
-3. Stack guard pages and a slab allocator with redzones.
-4. VFS reference counts and credential checks.
-5. Copy-on-write fork and per-process memory accounting.
-6. Window ownership, compositor client capabilities, and screen read policy.
-7. Cryptographic random source from hardware or a seeded entropy pool.
-8. ACPI table parsing instead of fixed power ports.
-9. Signed boot and measured boot.
-10. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
-11. KASLR and ASLR.
+1. VFS owner and mode storage so credentials actually gate file access, plus
+   a non-root default identity for spawned processes.
+2. Ownership checks for `kill`, sessions, process groups, and job control.
+3. NX, W^X, SMEP, SMAP, and UMIP.
+4. Stack guard pages and a slab allocator with redzones.
+5. Descriptor reference counts and per-process quotas.
+6. Copy-on-write fork and per-process memory accounting.
+7. Window ownership, compositor client capabilities, and screen read policy.
+8. Cryptographic random source from hardware or a seeded entropy pool.
+9. ACPI table parsing instead of fixed power ports.
+10. Signed boot and measured boot.
+11. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
+12. KASLR and ASLR.
 
 ## Reporting
 

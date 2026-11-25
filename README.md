@@ -5,8 +5,9 @@ It boots on BIOS through a two-stage loader into a freestanding C kernel and
 provides a small but real protected-mode environment: preemptive kernel
 threads, a preemptive user-process scheduler with per-process address spaces,
 a shared kernel high-half mapping, a kernel heap, a virtual filesystem backed
-by ramfs, ring-3 ELF64 processes with a syscall interface, a framebuffer
-graphics stack with a window-manager foundation, an interactive shell, and
+by ramfs, ring-3 ELF64 processes with POSIX-style primitives (descriptor
+tables, credentials, signals, timed waits), a framebuffer graphics stack with
+bitmap fonts, PS/2 mouse support and a compositor, an interactive shell, and
 automated boot-time self-tests.
 
 This repository is an engineering foundation, not a replacement for Windows,
@@ -16,7 +17,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 0.4.0, codename Scheduler. Development quality. Not production ready.
+Version 0.5.0, codename POSIX. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -24,13 +25,13 @@ Version 0.4.0, codename Scheduler. Development quality. Not production ready.
 | CPU tables | GDT, TSS, IDT, exception diagnostics, double-fault IST stack |
 | Interrupts | PIC remap, PIT at 100 Hz, PS/2 keyboard, serial RX, RTC |
 | Memory | E820 frame bitmap, 4-level paging, per-process PML4, shared high-half direct map |
-| Processes | PID table, parent links, ready queue, isolated ELF64 address spaces |
-| Scheduling | Preemptive kernel threads and preemptive time-sliced user processes |
+| Processes | PID table, ready queue, isolated address spaces, descriptor tables |
+| Scheduling | Preemptive kernel threads, time-sliced user processes, timed wait queues |
 | Filesystem | In-memory VFS and ramfs, 128 nodes, 1 MiB maximum file size |
 | User mode | Ring-3 static ELF64 C process, TSS kernel stack, `int 0x80` syscalls |
-| Graphics | PCI VGA probe, bochs dispi mode set, gfx surfaces, window manager |
+| Graphics | PCI VGA, gfx surfaces, window manager, 8x16 font, mouse cursor, compositor |
 | Shell | Directory and file commands, system information, ELF process launcher |
-| Verification | 107 in-kernel tests, boot smoke test, interactive shell test |
+| Verification | 194 in-kernel tests, boot smoke test, interactive shell test |
 
 Implemented and verified:
 
@@ -59,6 +60,14 @@ Implemented and verified:
 - Graphics context with clipping, rectangle fill, blitting, checksums, and frame drawing.
 - Window manager with create, destroy, z-order composition, and per-window surfaces.
 - User-space graphics program validated against real framebuffer pixels.
+- File descriptor tables with standard descriptors, allocation, dup, close, and fork inheritance.
+- POSIX credentials with uid, gid, euid, egid, permission matrices, and inheritance.
+- Signal delivery with user handlers, a sigreturn trampoline, blocked masks, and pending bits.
+- Blocking wait queue with timer expiry, `EAGAIN` timeouts, and `EINTR` interrupts.
+- 8x16 bitmap font rendered into framebuffer and window surfaces.
+- PS/2 mouse driver with packet decoding, button state, bounds clamping, and cursor save/restore.
+- Compositor abstraction with layers, z-order composition, damage rectangles, and flush callbacks.
+- Syscalls `open`, `close`, `read`, `dup`, `getuid`, `geteuid`, `signal`, `kill`, `sigreturn`, `sigprocmask`, `fb_text`, and `mouse`.
 - Shell commands for filesystem work, diagnostics, scheduling, ELF process launch, and power.
 - ACPI PM1a shutdown path for QEMU and compatible chipsets.
 - QEMU self-test image with machine-checkable pass or fail exit status.
@@ -70,7 +79,7 @@ Implemented and verified:
 Not implemented yet:
 
 - SMP, APIC, ACPI table parsing, and per-CPU scheduling.
-- POSIX process credentials, sessions, signals, and a file-descriptor table.
+- A POSIX ABI and libc, sessions, process groups, and job control.
 - Demand paging, copy-on-write, swapping, and a user-space heap.
 - Dynamic ELF loading, PIE relocation, shared libraries, and a user-space C library.
 - Persistent disks, block cache, journaling filesystem, permissions, and mount points.
@@ -158,33 +167,36 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 107 in-kernel checks covering physical memory,
+The self-test image runs 194 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
 ELF64 validation, per-process address spaces, high-half mapping, process
 lifecycle, preemptive time slicing, fork continuation, blocking wait,
-framebuffer VRAM access, gfx primitives, window composition, display
-registration, and the ring-3 syscall round trip. It then exits QEMU through
-the ISA debug exit device, so the harness can validate a machine-readable
-result rather than a screenshot.
+framebuffer VRAM access, gfx primitives, window composition, descriptor
+tables, credentials, signal delivery, wait queues, font rendering, mouse
+packets, compositor layering, POSIX user programs, and the ring-3 syscall
+round trip. It then exits QEMU through the ISA debug exit device, so the
+harness can validate a machine-readable result rather than a screenshot.
 
 The keyboard check injects `help` through the QEMU monitor, exercising the
 PS/2 controller, keyboard interrupt, scan-code translation, input queue, and
 shell line editor. The interactive test boots the normal image, connects to a
 TCP serial backend, runs shell commands, and verifies file creation, reads,
 appends, renames, copies, metadata, hexdumps, memory, preemptive process
-scheduling, fork and wait behaviour, framebuffer graphics composition, ACPI
-shutdown, and cleanup.
+scheduling, fork and wait behaviour, POSIX descriptor and signal behaviour,
+framebuffer graphics composition with fonts and cursor, ACPI shutdown, and
+cleanup.
 
 Verified environment: QEMU 7.0.0 on Windows, 256 MiB RAM, default `pc`
 machine and SeaBIOS. See [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## ELF64 user programs
 
-`user/init.c`, `user/multi.c`, `user/forktest.c`, and `user/guitest.c` are
-freestanding C programs compiled with Clang and linked by LLD at 0x40000000.
+`user/init.c`, `user/multi.c`, `user/forktest.c`, `user/guitest.c`,
+`user/postest.c`, and `user/guitest2.c` are freestanding C programs compiled
+with Clang and linked by LLD at 0x40000000.
 They use only the Z-OS syscall ABI and no hosted C library. Each linker output
 has two PT_LOAD segments: read-execute text and read-write data with BSS. The
-kernel embeds all four ELF64 images in its rodata.
+kernel embeds all six ELF64 images in its rodata.
 
 The loader accepts only static `ET_EXEC` images with page-aligned,
 non-overlapping PT_LOAD segments inside 0x40000000 to 0x4000FFFF. It validates
@@ -272,7 +284,60 @@ a background and three colored rectangles, reads pixels back through the
 kernel, and the kernel additionally verifies the real framebuffer content
 after the process exits.
 
-![Z-OS graphics stack](docs/gui.png)
+
+## POSIX primitives
+
+`kernel/fs/fd.c` implements per-process descriptor tables. Every process starts
+with descriptors 0, 1, and 2 bound to the console, then allocates file, console,
+and null descriptors with read, write, and append flags. Descriptor tables are
+copied on `fork`; a child closing its copy does not affect the parent.
+
+`kernel/task/cred.c` implements uid, gid, euid, egid, a privileged flag,
+owner/group/other permission checks, effective-identity changes, and credential
+inheritance across fork.
+
+`kernel/task/signal.c` implements pending and blocked signal masks, per-signal
+user handlers, a user sigreturn trampoline, and frame-level delivery. When a
+deliverable signal exists at the end of an interrupt or system call, the kernel
+pushes a saved register frame plus the trampoline address onto the user stack,
+redirects `rip` to the handler, and passes the signal number in `rdi`. The
+handler returns into the trampoline, which invokes `sigreturn`; the kernel
+restores the saved frame and resumes the interrupted instruction.
+
+`kernel/task/waitq.c` implements the blocking wait queue. A parent waiting for a
+child records its target PID and an optional deadline. A child exit wakes
+matching waiters, and the 100 Hz timer wakes parents whose deadline expired.
+`waitpid` returns `-EAGAIN` on timeout, `-EINTR` when a signal interrupts the
+wait, and `-ECHILD` when no matching child exists.
+
+Verified user-program flow (`postest`):
+
+```text
+postest: posix primitives test started
+postest: fd, credentials, signals, wait verified
+postest: exit status 0
+```
+
+## Fonts, mouse, and compositor
+
+`kernel/gui/font_data.h` contains a deterministic 8x16 bitmap atlas for ASCII
+32 to 126, generated from a real system font by `tools/gen_font.py` and
+committed to the tree. `kernel/gui/font.c` renders glyphs and text into any
+`gfx_surface`.
+
+`kernel/gui/mouse.c` initializes the PS/2 auxiliary device, decodes three-byte
+packets on IRQ12, tracks buttons and bounds, and renders a cursor with
+background save/restore so the pointer can move over composed content.
+
+`kernel/gui/compositor.c` implements the compositor abstraction: a target
+surface, heap-backed layers with position and visibility, z-order composition,
+damage rectangles, and an optional flush callback invoked after each present.
+
+Ring-3 programs receive framebuffer text through the `fb_text` syscall and
+mouse state through the `mouse` syscall. The `guitest2` program draws a panel
+with rendered text, reads pixels back through the kernel, queries mouse state,
+and the kernel verifies the real framebuffer afterwards.
+
 
 ## Shell
 
@@ -292,14 +357,16 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `pwd`, `cd`, `ls`, `cat`, `mkdir`, `rmdir`, `touch`, `write`, `append`,
 `rm`, `mv`, `cp`, `stat`, `hexdump`, `df`, `mem`, `free`, `uptime`, `date`,
 `ps`, `threads`, `sleep`, `history`, `rand`, `usertest`, `schedtest`,
-`forktest`, `gfx`, `reboot`, and `shutdown`.
+`forktest`, `postest`, `guitest2`, `gfx`, `reboot`, and `shutdown`.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and
-blocking wait. `gfx demo` enters graphics mode and composes two windows;
-`gfx test` performs the same composition, verifies pixels, and restores text
-mode; `gfx off` returns to text mode manually. `ps` reports kernel threads and
-process control blocks.
+blocking wait. `postest` exercises descriptors, credentials, signals, and timed
+wait. `guitest2` renders font text and queries the mouse. `gfx demo` enters
+graphics mode and composes two windows with fonts and a cursor; `gfx test`
+performs the same composition, verifies pixels, and restores text mode; `gfx
+off` returns to text mode manually. `ps` reports kernel threads and process
+control blocks.
 
 Line editing supports backspace, Ctrl+C, and Ctrl+L. Arrow keys are decoded
 for the shell but history navigation is not implemented yet.
@@ -312,17 +379,17 @@ kernel/        freestanding C and NASM kernel
   arch/        entry, GDT, IDT stubs, thread and process context switch
   cpu/         GDT, IDT, PIC, ELF64 loader, power
   drivers/     console, serial, keyboard, input queue, PIT, RTC, display registry
-  fs/          VFS and ramfs
+  fs/          VFS, ramfs, file descriptor tables
   include/     shared kernel interfaces and ELF definitions
   lib/         string and formatted output
   mm/          physical memory, paging, address spaces, heap
-  gui/         framebuffer driver, graphics context, window manager
+  gui/         framebuffer, graphics context, window manager, font, mouse, compositor
   sched/       preemptive kernel thread scheduler
   shell/       interactive shell
   subsys/      syscall dispatch
-  task/        process control blocks, process lifecycle, process scheduler
-user/          static ELF64 C user programs and linker script
-tools/         build and verification automation
+  task/        process control blocks, scheduler, credentials, signals, wait queue
+user/          static ELF64 C user programs, shared syscall header, linker script
+tools/         build, verification, and font atlas generation
 docs/          architecture, roadmap, verification
 ```
 

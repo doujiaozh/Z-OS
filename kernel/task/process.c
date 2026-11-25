@@ -9,6 +9,7 @@
 #include "string.h"
 #include "timer.h"
 #include "vmm.h"
+#include "waitq.h"
 
 static struct process process_table[MAX_PROCESSES];
 static struct process *ready_head = NULL;
@@ -27,6 +28,9 @@ static struct process *allocate_process(const char *name, u64 parent_pid) {
             process_table[index].state = PROCESS_UNUSED;
             process_table[index].created_ticks = timer_ticks();
             process_table[index].quantum = PROCESS_QUANTUM_TICKS;
+            fd_table_init(&process_table[index].fds);
+            cred_init_root(&process_table[index].cred);
+            signal_init(&process_table[index].signals);
             strncpy(process_table[index].name, name, sizeof(process_table[index].name) - 1);
             process_table[index].name[sizeof(process_table[index].name) - 1] = 0;
             return &process_table[index];
@@ -154,6 +158,7 @@ static void process_reset_frame(struct registers *frame, u64 entry, u64 user_sta
 void process_init(void) {
     memset(process_table, 0, sizeof(process_table));
     drain_ready_queue();
+    waitq_init();
     current_process = NULL;
     next_process_pid = 1;
     kprintf("Process: %u slots, kernel stack %u KiB, quantum %u ticks\n",
@@ -243,6 +248,13 @@ int process_fork_frame(u64 parent_pid, const struct registers *frame, u64 *child
     }
     child->entry = parent->entry;
     child->user_stack_top = parent->user_stack_top;
+    fd_copy(&child->fds, &parent->fds);
+    cred_inherit(&parent->cred, &child->cred);
+    child->signals.blocked = parent->signals.blocked;
+    child->signals.trampoline = parent->signals.trampoline;
+    child->signals.handler[0] = 0;
+    memcpy(child->signals.handler, parent->signals.handler, sizeof(parent->signals.handler));
+    child->signals.installed = parent->signals.installed;
     struct registers *child_frame = process_frame_slot(child);
     memcpy(child_frame, frame, sizeof(struct registers));
     child_frame->rax = 0;
@@ -301,6 +313,7 @@ void process_mark_zombie(struct process *process, u64 status) {
     process->state = PROCESS_ZOMBIE;
     process->exit_status = status;
     process->exited_ticks = timer_ticks();
+    waitq_remove(process->pid);
 }
 
 void process_wake_parent(struct process *child) {
@@ -308,14 +321,53 @@ void process_wake_parent(struct process *child) {
         return;
     }
     struct process *parent = process_find(child->parent_pid);
-    if (parent == NULL || parent->state != PROCESS_BLOCKED) {
+    if (parent == NULL) {
+        return;
+    }
+    if (parent->state != PROCESS_BLOCKED) {
         return;
     }
     if (parent->wait_target != 0 && parent->wait_target != child->pid) {
         return;
     }
     parent->wait_target = 0;
+    waitq_remove(parent->pid);
     process_enqueue_ready(parent);
+}
+
+bool process_has_pending_signal(struct process *process) {
+    return process != NULL && signal_has_deliverable(&process->signals);
+}
+
+bool process_deliver_signal(struct process *process, struct registers *frame) {
+    return signal_deliver(process, frame) > 0;
+}
+
+bool process_set_signal(struct process *process, u64 signum, u64 handler, u64 trampoline) {
+    if (process == NULL) {
+        return false;
+    }
+    if (signum == 0 || signum >= SIGNAL_MAX || signum == SIGNAL_SIGKILL || signum == SIGNAL_SIGSTOP) {
+        return false;
+    }
+    signal_install(&process->signals, signum, handler, trampoline);
+    return true;
+}
+
+bool process_raise_signal(u64 pid, u64 signum) {
+    struct process *target = process_find(pid);
+    if (target == NULL || target->state == PROCESS_ZOMBIE || target->state == PROCESS_UNUSED) {
+        return false;
+    }
+    if (!signal_raise(&target->signals, signum)) {
+        return false;
+    }
+    if (target->state == PROCESS_BLOCKED && !signal_is_blocked(&target->signals, signum)) {
+        target->wait_target = 0;
+        waitq_remove(target->pid);
+        process_enqueue_ready(target);
+    }
+    return true;
 }
 
 static void reclaim_process(struct process *process) {
@@ -358,6 +410,7 @@ int process_reap_child(u64 parent_pid, u64 target_pid, u64 *reaped_pid, u64 *sta
     u64 pid = found->pid;
     u64 exit_status = found->exit_status;
     reclaim_process(found);
+    waitq_remove(parent_pid);
     irq_restore(flags);
     if (reaped_pid != NULL) {
         *reaped_pid = pid;

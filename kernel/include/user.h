@@ -11,5 +11,9 @@ extern u8 user_forktest_start[];
 extern u8 user_forktest_end[];
 extern u8 user_guitest_start[];
 extern u8 user_guitest_end[];
+extern u8 user_postest_start[];
+extern u8 user_postest_end[];
+extern u8 user_guitest2_start[];
+extern u8 user_guitest2_end[];
 
 #endif

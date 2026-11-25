@@ -39,6 +39,8 @@ jobs:
             build/user_multi.elf
             build/user_forktest.elf
             build/user_guitest.elf
+            build/user_postest.elf
+            build/user_guitest2.elf
             build/manifest.json
             build/selftest.log
             build/smoke.log

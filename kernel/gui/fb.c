@@ -1,4 +1,5 @@
 #include "fb.h"
+#include "font.h"
 #include "heap.h"
 #include "io.h"
 #include "lib.h"
@@ -243,6 +244,13 @@ u64 fb_vram_physical_offset(u32 x, u32 y) {
 
 u32 fb_shadow_pixel(u32 x, u32 y) {
     return fb_pixel(x, y);
+}
+
+int fb_draw_text(u32 x, u32 y, const char *text, u32 color) {
+    if (!state.mode_active || text == NULL) {
+        return -1;
+    }
+    return font_draw_text(&state.surface, (i32)x, (i32)y, text, color);
 }
 
 int fb_write_test_pixels(u64 byte_offset, const u32 *values, u32 count) {

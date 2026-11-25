@@ -37,6 +37,7 @@ CFLAGS = [
     "-Ikernel/mm",
     "-Ikernel/task",
     "-Ikernel/gui",
+    "-Ikernel/fs",
 ]
 USER_CFLAGS = [
     "--target=x86_64-none-elf",
@@ -139,7 +140,7 @@ def build_boot():
     return stage1, stage2
 
 
-USER_PROGRAMS = ["init", "multi", "forktest", "guitest"]
+USER_PROGRAMS = ["init", "multi", "forktest", "guitest", "postest", "guitest2"]
 
 
 def build_user():

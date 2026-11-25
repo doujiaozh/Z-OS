@@ -9,12 +9,13 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.4.0 is the Scheduler stage. It boots, manages memory, runs preemptive
+Z-OS 0.5.0 is the POSIX stage. It boots, manages memory, runs preemptive
 kernel threads, hosts a VFS and shell, schedules Ring 3 ELF64 processes
 preemptively with private PML4 address spaces and kernel stacks, implements
-true fork continuation and blocking wait, provides a framebuffer driver with a
-graphics context and a window-manager foundation, and verifies itself under
-QEMU.
+file descriptor tables, POSIX credentials, signals with user handlers and
+sigreturn, timed waits with EAGAIN and EINTR, and extends the graphics stack
+with a bitmap font, PS/2 mouse cursor, and a compositor abstraction. It
+verifies itself under QEMU with 194 in-kernel checks.
 
 ## Phase 1 execution status
 
@@ -28,7 +29,12 @@ QEMU.
 | Preemptive user-process scheduling with per-process kernel stacks | Implemented and verified | v0.4.0-scheduler |
 | True fork continuation and blocking wait | Implemented and verified | v0.4.0-scheduler |
 | Framebuffer driver, graphics context, window-manager foundation | Implemented and verified | v0.4.0-scheduler |
-| POSIX credentials, signals, and file-descriptor table | Planned, next | v0.5.0-posix |
+| File descriptor tables with fork inheritance | Implemented and verified | v0.5.0-posix |
+| POSIX credentials and permission checks | Implemented and verified | v0.5.0-posix |
+| Signals with user handlers, sigreturn, and blocked masks | Implemented and verified | v0.5.0-posix |
+| Blocking wait queue with timeout, EAGAIN, and EINTR | Implemented and verified | v0.5.0-posix |
+| Bitmap font, PS/2 mouse cursor, compositor abstraction | Implemented and verified | v0.5.0-posix |
+| Persistent block device and on-disk filesystem | Planned, next | v0.6.0-storage |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -38,23 +44,23 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.4.0 Scheduler | Needed for general purpose |
+| Domain | 0.5.0 POSIX | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
 | Memory | Frame bitmap, per-process PML4, high-half direct map, heap | VMA tracking, demand paging, COW, swap, NUMA, slab allocators |
-| Processes | Process table, preemptive time slicing, fork frames, blocking wait, isolated PML4 | POSIX credentials, sessions, signals, process groups |
+| Processes | Process table, preemptive slicing, fork frames, blocking wait, descriptors, credentials, signals | Sessions, process groups, job control, POSIX ABI |
 | Threads | Preemptive kernel round-robin | User threads, priorities, affinity, futexes, real-time classes |
 | VFS | Ramfs, 128 nodes, global lock | Mounts, dcache, inode cache, page cache, permissions, quotas |
 | Storage | None | ATA, NVMe, virtio-blk, partitioning, journaling FS, fsck |
 | Networking | None | PCI NIC drivers, ARP, IPv4/IPv6, UDP/TCP, sockets, DNS, TLS |
-| Graphics | PCI framebuffer driver, gfx surfaces, window composer | Fonts, mouse, damage tracking, GPU drivers, acceleration |
+| Graphics | PCI framebuffer, gfx surfaces, window composer, 8x16 font, mouse cursor, compositor | Damage tracking, event queue, GPU drivers, acceleration |
 | Security | Ring 3, per-process user pages | NX, SMEP, SMAP, W^X, KASLR, ASLR, capabilities, MAC, audit |
 | Power | QEMU-compatible ACPI power request | ACPI parser, S3/S4, thermal, battery, cpufreq, idle governors |
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
-| ABI | Twelve custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
+| ABI | Twenty-four custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 107 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 194 boot tests and shell checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -88,13 +94,13 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v0.4.0-scheduler delivered the private PML4 address-space layer, the shared
-high-half direct map and device window, the process table, preemptive
-time-sliced user-process scheduling with per-process kernel stacks, true fork
-continuation, blocking wait with syscall restart, the PCI framebuffer driver,
-the graphics context, and the window-manager abstraction. The remaining items
-below move the process model toward full POSIX-style semantics and the
-graphics stack toward a usable desktop.
+v0.5.0-posix delivered file descriptor tables with fork inheritance, POSIX
+credentials with permission checks, signal delivery with user handlers and
+sigreturn, blocked masks, a blocking wait queue with deadline expiry and EINTR
+interrupts, a deterministic 8x16 bitmap font, a PS/2 mouse driver with cursor
+save and restore, and a compositor abstraction with layers, damage, and flush
+callbacks. The remaining items below move the process model toward a complete
+POSIX ABI and the graphics stack toward a usable desktop.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -297,15 +303,15 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add a file-descriptor table, POSIX credentials, process groups, signals,
-   and a blocking wait queue with timeout.
-2. Add a user heap, argv/envp, and static PIE relocation support.
-3. Extend the graphics stack with a bitmap font, framebuffer console, mouse
-   cursor, damage tracking, and a user-space compositor client.
+1. Add sessions, process groups, job control, signals for process groups, and
+   POSIX error numbering across every syscall.
+2. Add a user heap, argv/envp, static PIE relocation, and a libc.
+3. Extend the graphics stack with a framebuffer console, mouse event queue,
+   damage tracking, and a user-space compositor client.
 4. Unify kernel threads and user processes into one task model with a single
    scheduler.
-5. Complete the hardening backlog: guard pages, VFS reference counts, stack
-   traces, SMEP/SMAP, and NX.
+5. Complete the hardening backlog: guard pages, VFS reference counts and
+   ownership, stack traces, SMEP/SMAP, and NX.
 6. Add ACPI table parsing, PCI enumeration, and a persistent disk driver.
 7. Build the first user-space init and libc.
 

@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.4.0 implementation as it exists in this
+This document describes the Z-OS 0.5.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.4.0:
+Non-goals for 0.5.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -34,6 +34,7 @@ Non-goals for 0.4.0:
 | Timer | 8254 PIT, 100 Hz, interrupt vector 32 |
 | Keyboard | PS/2 scan-code set 1, interrupt vector 33 |
 | Serial | 16550-compatible COM1 at 0x3F8, interrupt vector 36 |
+| Mouse | PS/2 auxiliary device, interrupt vector 44 |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
 
@@ -364,7 +365,7 @@ Important limits:
 - Kernel threads and user processes use different schedulers. There is no
   unified task model yet.
 
-## VFS and ramfs
+## VFS, ramfs, and file descriptors
 
 - Static node pool of 128 nodes, protected by a global spinlock.
 - Node types: regular file, directory, character device.
@@ -380,9 +381,78 @@ Important limits:
 - Boot population: `/README`, `/etc/motd`, `/etc/version`, `/home/welcome`,
   `/tmp`, `/dev`, and the device nodes.
 
+`kernel/fs/fd.c` implements per-process descriptor tables:
+
+- 16 entries per process: 0 read console, 1 write console, 2 write console.
+- Entry types: console, VFS node, null device.
+- Flags: read, write, append. Reads and writes are rejected when the flag is
+  missing.
+- `open` resolves a path to a VFS node, `dup` copies an entry, `close` releases
+  it, and `fork` copies the whole table so parent and child own independent
+  descriptor state.
+- VFS file descriptors track their own byte offset.
+
 Limitations: no permissions, ownership, timestamps beyond creation ticks, hard
 links, symbolic links, mount points, page cache, journaling, persistent
-backing store, or fine-grained locking.
+backing store, fine-grained locking, or descriptor reference counts.
+
+## Credentials
+
+`kernel/task/cred.c` implements a minimal POSIX credential set:
+
+| Field | Meaning |
+| --- | --- |
+| `uid`, `gid` | Real user and group identifiers |
+| `euid`, `egid` | Effective identifiers used for checks |
+| `privileged` | True when euid is root |
+
+- Processes start with root credentials.
+- `cred_can_access` implements owner, group, and other permission classes and
+  grants everything to euid zero.
+- `cred_seteuid` and `cred_setegid` reject changes that would escalate an
+  unprivileged identity.
+- `cred_switch_user` lets a privileged credential become a normal user.
+- Credentials are inherited across fork.
+
+VFS nodes do not yet store ownership or mode bits, so the checks are exercised
+by unit tests and available to future filesystem and compatibility layers.
+
+## Signals
+
+`kernel/task/signal.c` implements signal state per process:
+
+- 32 signal numbers, pending mask, blocked mask, handler table, and trampoline
+  address.
+- `SIGKILL` and `SIGSTOP` cannot be caught or blocked.
+- Delivery happens at the end of an interrupt or system call return when a
+  deliverable signal exists and the interrupted context is Ring 3.
+- The kernel writes the current interrupt frame plus the user trampoline
+  address below the user stack pointer, redirects `rip` to the handler, sets
+  `rdi` to the signal number, and resumes Ring 3.
+- The handler returns into the trampoline, which calls the `sigreturn`
+  system call; the kernel restores the saved frame and resumes the interrupted
+  instruction with its original return value.
+- Delivery validates the target user stack range against the process address
+  space and temporarily switches CR3 if the caller is not already running in
+  that address space.
+- Default actions terminate the process for fatal signals and ignore
+  `SIGCHLD` and `SIGCONT`.
+
+## Wait queue and timed wait
+
+`kernel/task/waitq.c` implements blocking wait bookkeeping:
+
+- Entries record the waiting PID, an optional target child PID, and a deadline
+  in timer ticks.
+- A child exit wakes every waiter whose target matches.
+- The 100 Hz timer calls `waitq_expire`, which wakes parents whose deadline
+  passed.
+- `waitpid` first attempts to reap a zombie child. If a live child exists, it
+  records a deadline, marks the process blocked, and rewinds the saved `rip` by
+  the 2-byte `int 0x80` instruction so the call re-executes after wakeup.
+- On re-execution the call reaps the child, returns `-EINTR` if a deliverable
+  signal is pending, returns `-EAGAIN` if the deadline expired, or blocks again.
+- Process exit and reaping remove stale queue entries.
 
 ## User mode and ELF64 loading
 
@@ -454,6 +524,18 @@ Syscall ABI:
 | 10 | fb_rect | RDI=x, RSI=y, RDX=w, R10=h, R8=color | 0 or -1 |
 | 11 | fb_pixel | RDI=x, RSI=y | packed pixel value or -1 |
 | 12 | mark | RDI=marker id | records a scheduler trace mark |
+| 13 | open | RDI=path, RSI=flags | descriptor or -1 |
+| 14 | close | RDI=descriptor | 0 or -1 |
+| 15 | read | RDI=fd, RSI=buffer, RDX=length | bytes read or -1 |
+| 16 | getuid | none | real user identifier |
+| 17 | geteuid | none | effective user identifier |
+| 18 | signal | RDI=signum, RSI=handler, RDX=trampoline | 0 or -1 |
+| 19 | kill | RDI=pid, RSI=signum | 0 or -1 |
+| 20 | sigreturn | RDI=saved frame pointer | resumes the saved context |
+| 21 | sigprocmask | RDI=mask, RSI=operation | previous mask |
+| 22 | dup | RDI=descriptor | new descriptor or -1 |
+| 23 | fb_text | RDI=x, RSI=y, RDX=color, R10=text | 0 or -1 |
+| 24 | mouse | RDI=state buffer | 0 or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -486,6 +568,19 @@ Important limitations:
 `kernel/gui/gfx.c` defines `struct gfx_surface` and primitives: initialize,
 clear, plot, get pixel, clip, fill rectangle, horizontal line, vertical line,
 rectangle frame, blit, FNV checksum, and color counting.
+
+`kernel/gui/font_data.h` holds a deterministic 8x16 ASCII atlas generated by
+`tools/gen_font.py` from a real system font and committed to the tree.
+`kernel/gui/font.c` renders single characters and strings into any graphics
+surface.
+
+`kernel/gui/mouse.c` drives the PS/2 auxiliary device: controller
+configuration, IRQ12 packet assembly, delta and button decoding, bounds
+clamping, and a 12x12 cursor with background save and restore.
+
+`kernel/gui/compositor.c` implements the compositor abstraction: target
+surface, heap-backed layers, visibility and z-order, damage rectangles, and a
+flush callback invoked after each present.
 
 `kernel/gui/wm.c` defines the window-manager abstraction:
 
@@ -550,7 +645,8 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 8. Place the kernel after stage 2 in a zeroed 1.44 MiB image.
 9. Write sizes and SHA-256 hashes to `build/manifest.json`.
 
-The compiler include path adds `kernel/mm`, `kernel/task`, and `kernel/gui` for the
+The compiler include path adds `kernel/mm`, `kernel/task`, `kernel/gui`, and
+`kernel/fs` for the
 address-space and process interfaces. New C files are discovered recursively
 by the build script.
 
@@ -571,5 +667,5 @@ red zone, no builtins, no MMX/SSE, frame pointers, and optimization level 2.
   compatibility, floppy geometry support, and chipset-specific power control.
 - The kernel assumes exactly one CPU and does not program the local APIC.
 
-These boundaries are intentional for a 0.4.0 foundation and are tracked in
+These boundaries are intentional for a 0.5.0 foundation and are tracked in
 the roadmap.

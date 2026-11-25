@@ -7,6 +7,7 @@
 #include "keyboard.h"
 #include "serial.h"
 #include "timer.h"
+#include "mouse.h"
 #include "syscall.h"
 #include "sched.h"
 
@@ -128,6 +129,8 @@ void interrupt_dispatch(struct registers *registers) {
             keyboard_irq_handler();
         } else if (irq == PIC_IRQ_SERIAL) {
             serial_irq_handler();
+        } else if (irq == 12) {
+            mouse_irq_handler();
         }
         return;
     }

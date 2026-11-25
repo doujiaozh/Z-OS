@@ -32,6 +32,7 @@ u32 fb_pixel(u32 x, u32 y);
 int fb_fill(u32 x, u32 y, u32 width, u32 height, u32 color);
 u64 fb_vram_physical_offset(u32 x, u32 y);
 u32 fb_shadow_pixel(u32 x, u32 y);
+int fb_draw_text(u32 x, u32 y, const char *text, u32 color);
 int fb_write_test_pixels(u64 byte_offset, const u32 *values, u32 count);
 int fb_read_test_pixels(u64 byte_offset, u32 *values, u32 count);
 

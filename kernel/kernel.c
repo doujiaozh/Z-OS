@@ -6,6 +6,7 @@
 #include "io.h"
 #include "kernel.h"
 #include "keyboard.h"
+#include "mouse.h"
 #include "lib.h"
 #include "pmm.h"
 #include "pic.h"
@@ -50,6 +51,7 @@ void kmain(struct boot_info *boot) {
     sched_process_init();
     fb_init();
     wm_init();
+    mouse_init();
     sched_init();
 
     if (fb_device_found()) {

@@ -1,7 +1,9 @@
 #include "shell.h"
 #include "console.h"
 #include "fb.h"
+#include "font.h"
 #include "gfx.h"
+#include "mouse.h"
 #include "heap.h"
 #include "input.h"
 #include "kernel.h"
@@ -208,6 +210,8 @@ static void command_help(void) {
     kprintf("  usertest             run the ELF64 ring-3 program as a process\n");
     kprintf("  schedtest            run two user processes under time slicing\n");
     kprintf("  forktest             run the fork and blocking wait program\n");
+    kprintf("  postest              run the posix fd, signal and wait test program\n");
+    kprintf("  guitest2             run the font, mouse and compositor test program\n");
     kprintf("  gfx [demo|test|off]  framebuffer, gfx and window manager control\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
@@ -544,7 +548,7 @@ static void command_ps(void) {
     }
     kprintf("processes: %llu total, %llu ready, %llu blocked\n",
             process_count(), process_ready_count(), process_blocked_count());
-    struct process snapshot[MAX_PROCESSES];
+    static struct process snapshot[MAX_PROCESSES];
     u32 process_total = process_snapshot(snapshot, MAX_PROCESSES);
     if (process_total > 0) {
         kprintf("ppid  pid  state     ticks  switches  name\n");
@@ -699,6 +703,38 @@ static void command_schedtest(void) {
             pids[0], first_status, pids[1], second_status, result);
 }
 
+static void command_postest(void) {
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("postest", user_postest_start, user_postest_end, &status);
+    if (pid == 0) {
+        kprintf("postest: program failed to run\n");
+        return;
+    }
+    kprintf("postest: exit status %llu\n", status);
+}
+
+static void command_guitest2(void) {
+    if (fb_set_mode(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT, FB_DEFAULT_BPP) != 0) {
+        kprintf("guitest2: framebuffer mode set failed\n");
+        return;
+    }
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    run_single_program("guitest2", user_guitest2_start, user_guitest2_end, &status);
+    u32 lit = 0;
+    for (u32 y = 84; y < 100; y++) {
+        for (u32 x = 60; x < 240; x++) {
+            if (fb_pixel(x, y) == 0x00E8EEF7U) {
+                lit++;
+            }
+        }
+    }
+    bool verified = lit > 40 && fb_pixel(45, 45) == 0x00F2C14EU;
+    kprintf("guitest2: program status %llu, font pixels %u, framebuffer %s\n",
+            status, lit, verified ? "verified" : "failed");
+    fb_restore_text();
+    console_clear();
+}
+
 static void command_forktest(void) {
     u64 status = 0xFFFFFFFFFFFFFFFFULL;
     u64 pid = run_single_program("forktest", user_forktest_start, user_forktest_end, &status);
@@ -731,6 +767,8 @@ static void command_gfx(int argc, char *arguments[]) {
     gfx_clear(surface, 0x00101A2AU);
     gfx_fill_rect(surface, 0, 0, FB_DEFAULT_WIDTH, 28, 0x00E8EEF7U);
     gfx_fill_rect(surface, 0, FB_DEFAULT_HEIGHT - 28, FB_DEFAULT_WIDTH, 28, 0x00202A38U);
+    fb_draw_text(12, 6, "Z-OS 0.5 desktop foundation", 0x00203040U);
+    fb_draw_text(12, FB_DEFAULT_HEIGHT - 22, "posix primitives online", 0x00C8D4E4U);
     wm_init();
     struct wm_window *left = wm_create(48, 64, 300, 220, 0x00F0F4FAU);
     struct wm_window *right = wm_create(392, 96, 340, 260, 0x00E6ECF6U);
@@ -747,15 +785,32 @@ static void command_gfx(int argc, char *arguments[]) {
         wm_fill(right->id, 178, 148, 146, 88, 0x002AA6A6U);
     }
     wm_draw_to(surface);
+    fb_draw_text(64, 68, "files", 0x003C6E9EU);
+    fb_draw_text(408, 100, "network", 0x0080401AU);
+    fb_draw_text(64, 300, "graphics stack with font rendering and mouse cursor", 0x00D8E2F0U);
+    mouse_set_bounds(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT);
+    mouse_move_to(560, 320);
+    mouse_render(surface);
+    u32 text_pixels = 0;
+    for (u32 y = 6; y < 22; y++) {
+        for (u32 x = 12; x < 280; x++) {
+            if (fb_pixel(x, y) == 0x00203040U) {
+                text_pixels++;
+            }
+        }
+    }
     bool verified = fb_pixel(120, 140) == 0x00D9453DU &&
                     fb_pixel(460, 200) == 0x00F2C14EU &&
                     fb_pixel(620, 280) == 0x002AA6A6U &&
-                    fb_pixel(100, 70) == 0x003C6E9EU;
+                    fb_pixel(100, 70) == 0x003C6E9EU &&
+                    text_pixels > 20 &&
+                    fb_pixel(560, 320) == 0x00FFFFFFU;
     kprintf("gfx: framebuffer %ux%ux%u at %p, surface %s\n",
             fb_current_mode().width, fb_current_mode().height,
             fb_current_mode().bits_per_pixel, (void *)fb_current_mode().physical,
             fb_current_mode().shadow ? "shadow" : "vram");
     kprintf("gfx: window manager composited %u windows\n", wm_count());
+    kprintf("gfx: font pixels %u, cursor rendered\n", text_pixels);
     kprintf("gfx: composition %s\n", verified ? "verified" : "failed");
     while (wm_count() > 0) {
         u32 id = wm_zorder_at(0);
@@ -839,6 +894,10 @@ static void execute_command(int argc, char *arguments[]) {
         command_schedtest();
     } else if (strcmp(command, "forktest") == 0) {
         command_forktest();
+    } else if (strcmp(command, "postest") == 0) {
+        command_postest();
+    } else if (strcmp(command, "guitest2") == 0) {
+        command_guitest2();
     } else if (strcmp(command, "gfx") == 0) {
         command_gfx(argc, arguments);
     } else if (strcmp(command, "reboot") == 0) {

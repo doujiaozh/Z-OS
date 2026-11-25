@@ -1,8 +1,13 @@
 #include "tests.h"
+#include "compositor.h"
 #include "console.h"
+#include "cred.h"
 #include "elf.h"
+#include "fd.h"
+#include "font.h"
 #include "heap.h"
 #include "input.h"
+#include "interrupts.h"
 #include "io.h"
 #include "kernel.h"
 #include "lib.h"
@@ -12,6 +17,9 @@
 #include "power.h"
 #include "process.h"
 #include "sched.h"
+#include "signal.h"
+#include "waitq.h"
+#include "mouse.h"
 #include "rtc.h"
 #include "string.h"
 #include "thread.h"
@@ -567,6 +575,362 @@ static void test_graphics(void)
     check(process_count() == 0, "graphics process is reaped");
 }
 
+static u32 test_compositor_flush_count = 0;
+
+static void test_compositor_flush(struct compositor *compositor)
+{
+    if (compositor != NULL) {
+        test_compositor_flush_count++;
+    }
+}
+
+static void test_fd(void)
+{
+    struct fd_table table;
+    fd_table_init(&table);
+    check(fd_count(&table) == 3, "fd table starts with three standard descriptors");
+    struct vfs_node *readme = vfs_lookup(vfs_root(), "/README");
+    check(readme != NULL, "fd test locates a file");
+    int descriptor = fd_alloc(&table, FD_TYPE_VFS, FD_FLAG_READ, readme);
+    check(descriptor == 3, "fd allocation returns the lowest free descriptor");
+    char buffer[8];
+    int received = fd_read(&table, descriptor, buffer, 4);
+    check(received == 4 && buffer[0] == 'Z', "fd read returns file data at the current offset");
+    check(fd_read(&table, descriptor, buffer, 4) == 4, "fd offset advances across reads");
+    check(fd_write(&table, descriptor, "x", 1) == FD_ERROR_MODE,
+          "fd rejects writes on a read-only descriptor");
+    check(fd_close(&table, descriptor) == 0 && fd_count(&table) == 3, "fd close releases the descriptor");
+    check(fd_close(&table, descriptor) == FD_ERROR_INVALID, "fd rejects closing a closed descriptor");
+    struct fd_table copy;
+    fd_copy(&copy, &table);
+    int copy_descriptor = fd_alloc(&copy, FD_TYPE_VFS, FD_FLAG_READ, readme);
+    check(copy_descriptor == 3 && fd_close(&copy, copy_descriptor) == 0 && fd_count(&table) == 3,
+          "fd table copies keep independent descriptor state");
+    int duplicated = fd_dup(&table, 1);
+    check(duplicated == 3 && fd_close(&table, duplicated) == 0, "fd dup allocates an independent descriptor");
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *parent = process_create("fd-parent", 0, user_program_start, image_size);
+    check(parent != NULL, "fd test creates a parent process");
+    if (parent != NULL) {
+        int inherited = fd_alloc(&parent->fds, FD_TYPE_VFS, FD_FLAG_READ, readme);
+        struct registers frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.rip = ELF_USER_BASE;
+        frame.rsp = VMM_USER_STACK_TOP;
+        frame.cs = 0x1B;
+        frame.ss = 0x23;
+        frame.rflags = 0x202;
+        u64 child_pid = 0;
+        int fork_result = process_fork_frame(parent->pid, &frame, &child_pid);
+        struct process *child = process_find(child_pid);
+        check(fork_result == PROCESS_ERROR_NONE && child != NULL, "fd test forks a child process");
+        if (child != NULL) {
+            check(fd_get(&child->fds, inherited, NULL) == 0 &&
+                  fd_count(&child->fds) == fd_count(&parent->fds),
+                  "fork inherits the parent descriptor table");
+            fd_close(&child->fds, inherited);
+            check(fd_get(&child->fds, inherited, NULL) != 0 &&
+                  fd_get(&parent->fds, inherited, NULL) == 0,
+                  "child descriptor close leaves the parent descriptor open");
+            process_kill(child->pid, 0);
+        }
+        process_kill(parent->pid, 0);
+        process_reap_zombies();
+    }
+    check(process_count() == 0, "fd test reaps every process");
+}
+
+static void test_credentials(void)
+{
+    struct credentials root;
+    cred_init_root(&root);
+    check(cred_is_root(&root) && cred_can_access(&root, 1000, 1000, 0, 0, 0, CRED_MODE_READ),
+          "root credentials bypass permission bits");
+    struct credentials user;
+    cred_init(&user, 1000, 1000);
+    check(!cred_is_root(&user) && cred_effective_uid(&user) == 1000, "user credentials initialize correctly");
+    check(cred_can_access(&user, 1000, 1000, 6, 0, 0, 6), "owner mode grants read and write");
+    check(!cred_can_access(&user, 2000, 2000, 6, 6, 4, CRED_MODE_WRITE),
+          "other mode denies write access");
+    check(cred_can_access(&user, 2000, 1000, 6, CRED_MODE_READ, 0, CRED_MODE_READ),
+          "group mode grants read access");
+    check(!cred_can_access(&user, 2000, 3000, 6, 6, CRED_MODE_READ, 6),
+          "access is denied across owner, group and other classes");
+    bool escalated = cred_seteuid(&user, 0);
+    check(!escalated && !cred_is_root(&user), "unprivileged credentials cannot escalate to root");
+    struct credentials inherited;
+    cred_inherit(&user, &inherited);
+    check(inherited.uid == user.uid && inherited.euid == user.euid,
+          "credentials are inherited across fork");
+    struct credentials admin;
+    cred_init_root(&admin);
+    check(cred_switch_user(&admin, 1000, 1000) && admin.uid == 1000 && !admin.privileged,
+          "root credentials can switch to an unprivileged user");
+    check(cred_effective_gid(&user) == 1000, "effective group identifier is reported");
+}
+
+static void test_signals(void)
+{
+    struct signal_state state;
+    signal_init(&state);
+    check(state.pending == 0 && state.blocked == 0 && state.installed == 0, "signal state starts empty");
+    check(signal_install(&state, SIGNAL_SIGUSR1, 0x40000100ULL, 0x40000200ULL) == 0 && state.installed == 1,
+          "signal handler installs for an allowed signal");
+    check(signal_install(&state, SIGNAL_SIGKILL, 0x40000100ULL, 0x40000200ULL) == 0 && state.installed == 1,
+          "signal handler cannot be installed for sigkill");
+    check(signal_raise(&state, SIGNAL_SIGUSR1) && signal_pending_unblocked(&state) != 0,
+          "signal raise marks a deliverable signal");
+    check(signal_mask(&state, 1ULL << SIGNAL_SIGUSR1, 1) == 0 && !signal_has_deliverable(&state),
+          "blocked signals stay pending instead of delivering");
+    check(signal_mask(&state, 1ULL << SIGNAL_SIGUSR1, 2) == (1ULL << SIGNAL_SIGUSR1) &&
+          signal_has_deliverable(&state),
+          "unblocking releases the pending signal");
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *process = process_create("signal-test", 0, user_program_start, image_size);
+    check(process != NULL, "signal test creates a process");
+    if (process != NULL) {
+        u64 stack_frame = pmm_alloc_frame();
+        bool mapped = stack_frame != 0 &&
+                      vmm_map_user_page(&process->space, 0x40080000, stack_frame,
+                                        PTE_PRESENT | PTE_WRITABLE | PTE_USER) == 0;
+        check(mapped, "signal test maps a user stack page");
+        process_set_signal(process, SIGNAL_SIGUSR1, 0x40000010ULL, 0x40000020ULL);
+        signal_raise(&process->signals, SIGNAL_SIGUSR1);
+        struct registers frame;
+        memset(&frame, 0, sizeof(frame));
+        frame.rip = ELF_USER_BASE;
+        frame.rsp = 0x40080F00ULL;
+        frame.cs = 0x1B;
+        frame.ss = 0x23;
+        frame.rflags = 0x202;
+        int delivered = signal_deliver(process, &frame);
+        check(delivered == 1 && frame.rip == 0x40000010ULL && frame.rsp < 0x40080F00ULL,
+              "signal delivery redirects the user frame to the handler");
+        u64 trampoline = 0;
+        u64 active_pml4 = vmm_pml4_phys();
+        if (vmm_switch_address_space(&process->space) == 0) {
+            trampoline = *(u64 *)(usize)frame.rsp;
+            write_cr3(active_pml4);
+        }
+        check(trampoline == 0x40000020ULL, "signal frame stores the user sigreturn trampoline");
+        check(process->signals.delivered == 1, "signal delivery counter advances");
+        check(!process_has_pending_signal(process), "delivered signal clears the pending bit");
+        struct registers saved;
+        memset(&saved, 0, sizeof(saved));
+        saved.rip = ELF_USER_BASE;
+        saved.rsp = 0x40080E00ULL;
+        saved.cs = 0x1B;
+        saved.ss = 0x23;
+        check(signal_restore(&frame, &saved, sizeof(saved)) && frame.rip == ELF_USER_BASE &&
+              frame.rsp == 0x40080E00ULL,
+              "sigreturn restores the saved user register frame");
+        process_kill(process->pid, 0);
+        process_reap_zombies();
+    }
+    check(process_count() == 0, "signal test reaps its process");
+}
+
+static void test_wait_queue(void)
+{
+    waitq_init();
+    check(waitq_count() == 0, "wait queue starts empty");
+    u64 image_size = (u64)(user_program_end - user_program_start);
+    struct process *waiter = process_create("waitq-waiter", 0, user_program_start, image_size);
+    check(waiter != NULL, "wait queue test creates a waiting process");
+    if (waiter == NULL) {
+        return;
+    }
+    process_dequeue_ready(waiter);
+    waiter->state = PROCESS_BLOCKED;
+    check(waitq_block(waiter->pid, 0, 0) == 0 && waitq_count() == 1,
+          "wait queue records a blocked parent");
+    check(waitq_deadline(waiter->pid) == 0, "wait queue reports an infinite deadline");
+    check(waitq_wake_target(4242) == 1 && waiter->state == PROCESS_READY,
+          "wait queue wakes a parent when a child exits");
+    process_dequeue_ready(waiter);
+    waiter->state = PROCESS_BLOCKED;
+    u64 now = timer_ticks();
+    waitq_block(waiter->pid, 0, now + 1);
+    check(waitq_expire(now + 1) == 1 && waiter->state == PROCESS_READY,
+          "wait queue expires a timed wait");
+    process_dequeue_ready(waiter);
+    waiter->state = PROCESS_BLOCKED;
+    waitq_block(waiter->pid, 0, 0);
+    waitq_remove(waiter->pid);
+    check(waitq_count() == 0, "wait queue removal releases the entry");
+    process_kill(waiter->pid, 0);
+    process_reap_zombies();
+    check(process_count() == 0, "wait queue test reaps its process");
+}
+
+static void test_font(void)
+{
+    check(font_glyph_pixels(' ') == 0, "font space glyph is blank");
+    check(font_glyph_pixels('A') > 8, "font letter glyph contains pixels");
+    u32 populated_rows = 0;
+    for (u32 row = 0; row < FONT_CHAR_HEIGHT; row++) {
+        if (font_glyph_row('Z', row) != 0) {
+            populated_rows++;
+        }
+    }
+    check(font_glyph_pixels('Z') > 8 && populated_rows > 4, "font glyph bitmap spans multiple rows");
+    check(font_text_width("Z-OS") == 32, "font text width advances eight pixels per character");
+    check(font_text_width("") == 0, "font width of empty text is zero");
+    static u32 font_pixels[64 * 32];
+    static u32 other_pixels[64 * 32];
+    struct gfx_surface surface;
+    struct gfx_surface other;
+    gfx_init_surface(&surface, font_pixels, 64, 32, 64, GFX_FORMAT_RGB32);
+    gfx_init_surface(&other, other_pixels, 64, 32, 64, GFX_FORMAT_RGB32);
+    gfx_clear(&surface, 0);
+    gfx_clear(&other, 0);
+    font_draw_text(&surface, 0, 0, "Z-OS", 0x00FFFFFFU);
+    font_draw_text(&other, 0, 0, "Z-OS", 0x00FFFFFFU);
+    u32 lit = gfx_count_color(&surface, 0, 0, 64, 32, 0x00FFFFFFU);
+    check(lit > 20, "font draws visible text into a graphics surface");
+    check(gfx_checksum(&surface, 0, 0, 64, 32) == gfx_checksum(&other, 0, 0, 64, 32),
+          "font rendering is deterministic");
+    static u32 third_pixels[64 * 32];
+    struct gfx_surface third;
+    gfx_init_surface(&third, third_pixels, 64, 32, 64, GFX_FORMAT_RGB32);
+    gfx_clear(&third, 0);
+    font_draw_text(&third, 0, 0, "Z-OS", 0x00FFFFFFU);
+    font_draw_text(&third, 0, 16, "line", 0x00FFFFFFU);
+    check(gfx_checksum(&third, 0, 0, 64, 32) != gfx_checksum(&surface, 0, 0, 64, 32),
+          "font text placement changes rendered output");
+}
+
+static void test_mouse(void)
+{
+    mouse_init();
+    struct mouse_state state;
+    mouse_get_state(&state);
+    check(state.initialized, "mouse driver initializes the ps2 auxiliary device");
+    mouse_set_bounds(320, 200);
+    mouse_move_to(100, 100);
+    u8 packet[3];
+    packet[0] = 0x08;
+    packet[1] = 10;
+    packet[2] = 4;
+    mouse_process_packet(packet);
+    mouse_get_state(&state);
+    check(state.x == 110 && state.y == 96, "mouse decodes relative movement packets");
+    u32 packets_before = state.packets;
+    packet[0] = 0x09;
+    packet[1] = 0;
+    packet[2] = 0;
+    mouse_process_packet(packet);
+    mouse_get_state(&state);
+    check(state.packets == packets_before + 1 && (state.buttons & MOUSE_BUTTON_LEFT) != 0,
+          "mouse decodes button state changes");
+    static u32 cursor_pixels[64 * 64];
+    struct gfx_surface surface;
+    gfx_init_surface(&surface, cursor_pixels, 64, 64, 64, GFX_FORMAT_RGB32);
+    gfx_clear(&surface, 0x00010203U);
+    u32 blank_checksum = gfx_checksum(&surface, 0, 0, 64, 64);
+    mouse_move_to(20, 20);
+    check(mouse_render(&surface) == 0 &&
+          gfx_count_color(&surface, 0, 0, 64, 64, 0x00FFFFFFU) > 0,
+          "mouse renders a cursor into a surface");
+    check(mouse_restore(&surface) == 0 &&
+          gfx_count_color(&surface, 0, 0, 64, 64, 0x00FFFFFFU) == 0,
+          "mouse restores the background under the cursor");
+    check(gfx_checksum(&surface, 0, 0, 64, 64) == blank_checksum,
+          "mouse cursor restore leaves the surface unchanged");
+    mouse_move_to(319, 199);
+    packet[0] = 0x28;
+    packet[1] = 100;
+    packet[2] = 0xF0;
+    mouse_process_packet(packet);
+    mouse_get_state(&state);
+    check(state.x == 319 && state.y == 199, "mouse clamps movement to the surface bounds");
+}
+
+static void test_compositor(void)
+{
+    static u32 compositor_pixels[64 * 64];
+    struct gfx_surface target;
+    gfx_init_surface(&target, compositor_pixels, 64, 64, 64, GFX_FORMAT_RGB32);
+    gfx_clear(&target, 0);
+    struct compositor compositor;
+    check(compositor_init(&compositor, &target, test_compositor_flush) == 0 &&
+          compositor_layer_count(&compositor) == 0,
+          "compositor initializes with a target surface");
+    struct compositor_layer *lower = compositor_add_layer(&compositor, 2, 2, 20, 16, 0x00AA0000U);
+    check(lower != NULL && compositor_layer_count(&compositor) == 1, "compositor adds a layer");
+    if (lower != NULL) {
+        gfx_fill_rect(&lower->surface, 0, 0, 20, 16, 0x00FF0000U);
+    }
+    struct compositor_layer *upper = compositor_add_layer(&compositor, 10, 8, 20, 16, 0x000000FFU);
+    check(upper != NULL && compositor_layer_count(&compositor) == 2, "compositor adds a second layer");
+    check(compositor_present(&compositor) == 0 && compositor.composites == 1,
+          "compositor presents the composed frame");
+    check(gfx_get_pixel(&target, 3, 3) == 0x00FF0000U, "compositor draws the first layer");
+    check(gfx_get_pixel(&target, 11, 9) == 0x000000FFU, "compositor stacks later layers on top");
+    check(compositor.flush_count == 1 && test_compositor_flush_count == 1,
+          "compositor invokes the flush callback");
+    compositor_damage(&compositor, 1, 1, 8, 8);
+    compositor_damage(&compositor, 4, 4, 8, 8);
+    check(compositor_damage_count(&compositor) == 2, "compositor records damage rectangles");
+    compositor_clear_damage(&compositor);
+    check(compositor_damage_count(&compositor) == 0, "compositor clears damage after present");
+    if (lower != NULL) {
+        check(compositor_remove_layer(&compositor, lower->id) == 0 &&
+              compositor_layer_count(&compositor) == 1,
+              "compositor removes a layer");
+    }
+    compositor_present(&compositor);
+    check(gfx_get_pixel(&target, 3, 3) == 0x00101820U &&
+          gfx_get_pixel(&target, 11, 9) == 0x000000FFU,
+          "compositor excludes removed layers from output");
+    if (upper != NULL) {
+        compositor_remove_layer(&compositor, upper->id);
+    }
+    check(compositor_layer_count(&compositor) == 0, "compositor layer table drains");
+}
+
+static void test_posix_user_program(void)
+{
+    sched_mark_reset();
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_program("postest", user_postest_start, user_postest_end, &status);
+    check(pid != 0 && status == 0, "posix user program validates fd, signals and wait");
+    check(sched_marker_total(0x31) > 0 && sched_marker_total(0x32) > 0 &&
+          sched_marker_total(0x33) > 0 && sched_marker_total(0x34) > 0,
+          "user descriptor inheritance marks are observed");
+    check(sched_marker_total(0x35) > 0, "user wait timeout path is observed");
+    check(sched_marker_total(0x36) > 0 && sched_marker_total(0x37) > 0 &&
+          sched_marker_total(0x38) > 0,
+          "user signal delivery, blocking and interrupt paths are observed");
+    check(sched_marker_total(0x3F) == 0, "posix user program reported no failure marker");
+    process_reap_zombies();
+    check(process_count() == 0, "posix user program processes are reaped");
+}
+
+static void test_extended_graphics(void)
+{
+    check(fb_set_mode(800, 600, 32) == 0, "extended graphics applies the framebuffer mode");
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_program("guitest2", user_guitest2_start, user_guitest2_end, &status);
+    check(pid != 0 && status == 0, "user graphics program renders text and reports mouse state");
+    u32 text_lit = 0;
+    for (u32 y = 84; y < 100; y++) {
+        for (u32 x = 60; x < 240; x++) {
+            if (fb_pixel(x, y) == 0x00E8EEF7U) {
+                text_lit++;
+            }
+        }
+    }
+    check(text_lit > 40, "framebuffer contains rendered font pixels");
+    check(fb_pixel(45, 45) == 0x00F2C14EU, "framebuffer contains the rendered title bar");
+    check(fb_pixel(100, 240) == 0x00D9453DU, "framebuffer contains the accent rectangle");
+    fb_restore_text();
+    console_clear();
+    check(!fb_mode_active(), "extended graphics restores text mode");
+    process_reap_zombies();
+    check(process_count() == 0, "extended graphics processes are reaped");
+}
+
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -583,6 +947,15 @@ void selftest_thread(void *argument)
     test_fork_wait();
     test_display();
     test_graphics();
+    test_fd();
+    test_credentials();
+    test_signals();
+    test_wait_queue();
+    test_font();
+    test_mouse();
+    test_compositor();
+    test_posix_user_program();
+    test_extended_graphics();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");
