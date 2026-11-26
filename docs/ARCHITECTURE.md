@@ -747,6 +747,35 @@ cross, geometric hit tests, raise by z-order, visibility toggles and
 `wm_compose` for framed composition. `wm_draw_to` still composites content
 only, so earlier window-manager tests keep their original pixel semantics.
 
+## Double buffering and dirty rectangles
+
+`kernel/gui/fb.c` provides an off-screen double buffer for the framebuffer:
+
+- `fb_double_buffer` allocates a full-screen RGB32 surface from the kernel heap
+  the first time a graphics session starts and returns it as a normal
+  `gfx_surface`.
+- `fb_present_rect` copies one rectangle from the back buffer to VRAM and
+  `fb_present` copies the whole frame.
+- The desktop renders into the back buffer. Because every frame is composed in
+  RAM first, the display never shows a half-finished desktop, which is what
+  caused the visible flicker when the scene was drawn straight into VRAM.
+
+`kernel/gui/desktop.c` tracks a damage region:
+
+- `desktop_dirty_mark` merges rectangles into a single union, clipping them to
+  the screen.
+- Window drags mark the union of the old and the new window rectangle, so a
+  drag only copies two small window-sized regions per pointer packet.
+- Opening, closing, hiding, raising or focusing windows marks the full screen.
+- `desktop_dirty_take` returns and clears the pending region.
+
+The GUI session loop only repaints when a handler reports a scene change.
+Pointer movement without interaction erases and redraws only the 16 by 16
+cursor rectangle on VRAM and performs no scene compositing or full present at
+all. The session reports `gui: frames full=<n> dirty=<n> moves=<n> move_full=<n>`
+on exit; the automated GUI stage asserts that `move_full` is zero, which proves
+that mouse movement never triggers a full-screen repaint.
+
 ## GUI mode switching
 
 The shell owns the console, so the desktop runs as a session inside the shell
@@ -756,9 +785,23 @@ thread:
   mode, initialize the desktop, then loop on mouse events and non-blocking
   keyboard input, re-rendering after each event.
 - `exit` typed inside the desktop, the Esc key, or the taskbar exit control
-  ends the loop. The session restores text mode by disabling VBE and
-  reprogramming the VGA sequencer, CRTC, graphics controller and attribute
-  controller for 80x25 text mode, so the console is genuinely usable again.
+  ends the loop. The session restores text mode with a full VGA mode 3
+  sequence: disable video through the attribute controller, program the
+  miscellaneous output register, reset and program the sequencer, unlock and
+  program all 25 CRTC registers, program the nine graphics controller
+  registers, program the 21 attribute controller registers, restore the
+  underline cursor shape, clear the 0xB8000 text buffer, reload the complete
+  256-entry 8x16 font into plane 2 through the sequencer and graphics-controller
+  memory map, and only then re-enable video. Reloading the font is what makes
+  the restored console robust: if the character generator plane was disturbed
+  by the VBE session, text mode would otherwise display solid blocks or white
+  lines instead of glyphs.
+- The kernel self-test reads back the CRTC horizontal and vertical timing
+  registers, the sequencer clocking and memory mode registers, the graphics
+  controller mode registers, the attribute controller mode control register,
+  a font plane byte and a text buffer cell after the restore, so a broken
+  restore sequence fails the boot self-test instead of appearing as screen
+  corruption.
 - Syscalls 25 and 26 (`gui_enter`, `gui_exit`) set request flags that the shell
   checks after each command, so a ring-3 program can ask for a session change
   without owning the console.

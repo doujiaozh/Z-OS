@@ -16,8 +16,8 @@ with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
 provides mouse events, a text-mode pointer, window frames with dragging and
 close buttons, and a modern desktop with status bar, taskbar, icons and hit
 tested interaction, plus a GUI session that returns to a fully restored VGA
-text console. It verifies itself under QEMU with 253 in-kernel checks plus
-cross-reboot storage replay and framebuffer desktop tests.
+text console. It verifies itself under QEMU with 267 in-kernel checks plus
+cross-reboot storage replay, desktop, double buffering and VGA restore tests.
 
 ## Phase 1 execution status
 
@@ -59,13 +59,13 @@ claimed as complete.
 | VFS | Ramfs, 128 nodes, global lock | Mounts, dcache, inode cache, page cache, permissions, quotas |
 | Storage | None | ATA, NVMe, virtio-blk, partitioning, journaling FS, fsck |
 | Networking | None | PCI NIC drivers, ARP, IPv4/IPv6, UDP/TCP, sockets, DNS, TLS |
-| Graphics | PCI framebuffer, gfx surfaces, fonts, mouse events, compositor, desktop shell, hit testing | Damage tracking, GPU drivers, acceleration, user-space clients |
+| Graphics | PCI framebuffer, double buffering, damage rectangles, fonts, mouse events, compositor, desktop shell, hit testing | GPU drivers, acceleration, user-space clients, vsync |
 | Security | Ring 3, per-process user pages | NX, SMEP, SMAP, W^X, KASLR, ASLR, capabilities, MAC, audit |
 | Power | QEMU-compatible ACPI power request | ACPI parser, S3/S4, thermal, battery, cpufreq, idle governors |
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 253 boot tests, storage replay and desktop checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 267 boot tests, storage, desktop, buffering and VGA restore checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -104,9 +104,11 @@ filesystem with format, mount, file operations and a /disk VFS mount, the
 system-wide mouse event queue, the text-mode pointer overlay, window titles,
 close buttons, dragging and z-order composition, the desktop shell with status
 bar, taskbar, icons and hit testing, GUI session switching with a restored VGA
-text console, and the gui_enter and gui_exit syscalls. The remaining items
-below move storage toward a real disk filesystem, the desktop toward a
-user-space compositor, and the system toward networking.
+text console, the gui_enter and gui_exit syscalls, an outlined graphical
+cursor, a full-screen back buffer with damage rectangle presentation, and a
+complete VGA mode 3 restore sequence that reloads the character generator font.
+The remaining items below move storage toward a real disk filesystem, the
+desktop toward a user-space compositor, and the system toward networking.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.

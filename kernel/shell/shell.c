@@ -727,51 +727,108 @@ static void gui_print_action(char *previous) {
     }
 }
 
+static int gui_present_frame(bool buffered) {
+    if (!buffered) {
+        return 0;
+    }
+    i32 x = 0;
+    i32 y = 0;
+    u32 width = 0;
+    u32 height = 0;
+    if (desktop_dirty_take(&x, &y, &width, &height)) {
+        fb_present_rect(x, y, width, height);
+        return 1;
+    }
+    fb_present();
+    return 0;
+}
+
+static int gui_redraw_frame(struct gfx_surface *vram, bool buffered) {
+    mouse_restore(vram);
+    desktop_render();
+    int partial = gui_present_frame(buffered);
+    mouse_render(vram);
+    return partial;
+}
+
 static void gui_run_session(void) {
     if (fb_set_mode(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT, FB_DEFAULT_BPP) != 0) {
         kprintf("gui: framebuffer mode set failed\n");
         return;
     }
-    struct gfx_surface *surface = fb_surface();
-    if (surface == NULL) {
+    struct gfx_surface *vram = fb_surface();
+    if (vram == NULL) {
         kprintf("gui: no graphics surface\n");
         fb_restore_text();
         console_clear();
         return;
     }
+    struct gfx_surface *scene = fb_double_buffer();
+    bool buffered = scene != NULL && scene != vram;
+    if (scene == NULL) {
+        scene = vram;
+    }
     mouse_set_bounds(FB_DEFAULT_WIDTH, FB_DEFAULT_HEIGHT);
     mouse_set_gui_mode(true);
-    desktop_init(surface);
+    desktop_init(scene);
+    desktop_dirty_mark_full();
     desktop_render();
-    mouse_render(surface);
+    if (buffered) {
+        fb_present();
+    }
+    mouse_render(vram);
     kprintf("gui: desktop active\n");
     char previous[48];
     previous[0] = 0;
+    u32 full_frames = 0;
+    u32 dirty_frames = 0;
+    u32 move_events = 0;
+    u32 move_full_frames = 0;
     while (!desktop_should_exit()) {
         struct mouse_event event;
         while (mouse_pop_event(&event)) {
-            if (event.type == MOUSE_EVENT_MOVE) {
+            bool changed = desktop_handle_mouse(&event);
+            bool move_event = event.type == MOUSE_EVENT_MOVE;
+            if (move_event) {
+                move_events++;
+            }
+            if (changed) {
+                int partial = gui_redraw_frame(vram, buffered);
+                if (partial != 0) {
+                    dirty_frames++;
+                } else if (buffered) {
+                    full_frames++;
+                    if (move_event) {
+                        move_full_frames++;
+                    }
+                }
+                gui_print_action(previous);
+            } else if (move_event) {
+                mouse_restore(vram);
+                mouse_render(vram);
                 kprintf("gui: mouse move x=%d y=%d dx=%d dy=%d\n",
                         event.x, event.y, event.delta_x, event.delta_y);
             }
-            mouse_restore(surface);
-            desktop_handle_mouse(&event);
-            desktop_render();
-            mouse_render(surface);
-            gui_print_action(previous);
         }
         int key = input_trygetchar();
         while (key >= 0) {
-            desktop_handle_key((char)key);
-            mouse_restore(surface);
-            desktop_render();
-            mouse_render(surface);
-            gui_print_action(previous);
+            bool changed = desktop_handle_key((char)key);
+            if (changed) {
+                int partial = gui_redraw_frame(vram, buffered);
+                if (partial != 0) {
+                    dirty_frames++;
+                } else if (buffered) {
+                    full_frames++;
+                }
+                gui_print_action(previous);
+            }
             key = input_trygetchar();
         }
         sched_sleep_ms(15);
     }
-    mouse_restore(surface);
+    kprintf("gui: frames full=%u dirty=%u moves=%u move_full=%u\n",
+            full_frames, dirty_frames, move_events, move_full_frames);
+    mouse_restore(vram);
     mouse_set_gui_mode(false);
     fb_restore_text();
     console_clear();

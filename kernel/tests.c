@@ -1176,6 +1176,57 @@ static void test_gui_mode(void)
     check(!fb_mode_active(), "gui exit restores text mode");
 }
 
+static void test_vga_text_restore(void)
+{
+    check(fb_set_mode(800, 600, 32) == 0, "vga restore test enters graphics mode");
+    struct gfx_surface *buffer = fb_double_buffer();
+    struct gfx_surface *vram = fb_surface();
+    check(buffer != NULL && vram != NULL && buffer != vram,
+          "framebuffer exposes a separate double buffer surface");
+    if (buffer == NULL || vram == NULL) {
+        fb_restore_text();
+        console_clear();
+        return;
+    }
+    u32 outside_before = fb_pixel(5, 5);
+    gfx_clear(buffer, 0x00112233U);
+    gfx_fill_rect(buffer, 10, 20, 30, 40, 0x00AABBCCU);
+    fb_present_rect(10, 20, 30, 40);
+    check(fb_pixel(20, 30) == 0x00AABBCCU, "dirty present copies the changed rectangle to vram");
+    check(fb_pixel(5, 5) == outside_before, "dirty present leaves pixels outside the rectangle untouched");
+    fb_present();
+    check(fb_pixel(5, 5) == 0x00112233U, "full present copies the whole frame to vram");
+    desktop_init(buffer);
+    desktop_dirty_reset();
+    desktop_dirty_mark(100, 50, 10, 10);
+    desktop_dirty_mark(120, 80, 10, 10);
+    i32 dirty_x = 0;
+    i32 dirty_y = 0;
+    u32 dirty_width = 0;
+    u32 dirty_height = 0;
+    bool dirty_ok = desktop_dirty_take(&dirty_x, &dirty_y, &dirty_width, &dirty_height);
+    check(dirty_ok && dirty_x == 100 && dirty_y == 50 && dirty_width >= 30 && dirty_height >= 40,
+          "desktop dirty rectangles merge into one damage region");
+    fb_restore_text();
+    console_clear();
+    check(!fb_double_buffer_ready(), "text mode restore releases the double buffer");
+    check(fb_vga_crtc_register(0x00) == 0x5F && fb_vga_crtc_register(0x01) == 0x4F,
+          "text mode restore programs the crtc horizontal timing");
+    check(fb_vga_crtc_register(0x06) == 0xBF && fb_vga_crtc_register(0x12) == 0x8F,
+          "text mode restore programs the crtc vertical timing");
+    check(fb_vga_sequencer_register(0x01) == 0x00 && fb_vga_sequencer_register(0x04) == 0x02,
+          "text mode restore programs the sequencer clocking and memory mode");
+    check(fb_vga_graphics_register(0x05) == 0x10 && fb_vga_graphics_register(0x06) == 0x0E,
+          "text mode restore programs the graphics controller mode registers");
+    check((fb_vga_attribute_register(0x10) & 0x01) == 0,
+          "text mode restore leaves the attribute controller in text mode");
+    check(fb_vga_font_byte('A', 0) == (u8)font_glyph_row('A', 0),
+          "text mode restore reloads the font plane");
+    console_clear();
+    kprintf("VGA RESTORE OK\n");
+    check((fb_vga_text_cell(0, 0) & 0x00FF) == 'V',
+          "text mode restore leaves a usable text buffer for the shell");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1207,6 +1258,7 @@ void selftest_thread(void *argument)
     test_wm_frames();
     test_desktop();
     test_gui_mode();
+    test_vga_text_restore();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

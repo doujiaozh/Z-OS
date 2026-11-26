@@ -35,5 +35,16 @@ u32 fb_shadow_pixel(u32 x, u32 y);
 int fb_draw_text(u32 x, u32 y, const char *text, u32 color);
 int fb_write_test_pixels(u64 byte_offset, const u32 *values, u32 count);
 int fb_read_test_pixels(u64 byte_offset, u32 *values, u32 count);
+struct gfx_surface *fb_double_buffer(void);
+bool fb_double_buffer_ready(void);
+int fb_present_rect(i32 x, i32 y, u32 width, u32 height);
+int fb_present(void);
+void fb_release_double_buffer(void);
+u8 fb_vga_crtc_register(u8 index);
+u8 fb_vga_sequencer_register(u8 index);
+u8 fb_vga_graphics_register(u8 index);
+u8 fb_vga_attribute_register(u8 index);
+u16 fb_vga_text_cell(u32 column, u32 row);
+u8 fb_vga_font_byte(u32 character, u32 row);
 
 #endif

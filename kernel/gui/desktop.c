@@ -16,6 +16,93 @@ static i32 drag_offset_y = 0;
 static char key_buffer[16];
 static u32 key_length = 0;
 static u32 taskbar_buttons[DESKTOP_MAX_APPS];
+static bool dirty_valid = false;
+static i32 dirty_x = 0;
+static i32 dirty_y = 0;
+static u32 dirty_width = 0;
+static u32 dirty_height = 0;
+
+static void dirty_union(i32 x, i32 y, u32 width, u32 height) {
+    if (x < 0) {
+        width += (u32)(-x);
+        x = 0;
+    }
+    if (y < 0) {
+        height += (u32)(-y);
+        y = 0;
+    }
+    if ((u32)x >= 800 || (u32)y >= 600 || width == 0 || height == 0) {
+        return;
+    }
+    if ((u32)x + width > 800) {
+        width = 800 - (u32)x;
+    }
+    if ((u32)y + height > 600) {
+        height = 600 - (u32)y;
+    }
+    if (!dirty_valid) {
+        dirty_valid = true;
+        dirty_x = x;
+        dirty_y = y;
+        dirty_width = width;
+        dirty_height = height;
+        return;
+    }
+    i32 right = x + (i32)width;
+    i32 bottom = y + (i32)height;
+    i32 current_right = dirty_x + (i32)dirty_width;
+    i32 current_bottom = dirty_y + (i32)dirty_height;
+    if (x < dirty_x) {
+        dirty_x = x;
+    }
+    if (y < dirty_y) {
+        dirty_y = y;
+    }
+    if (right > current_right) {
+        current_right = right;
+    }
+    if (bottom > current_bottom) {
+        current_bottom = bottom;
+    }
+    dirty_width = (u32)(current_right - dirty_x);
+    dirty_height = (u32)(current_bottom - dirty_y);
+}
+
+void desktop_dirty_reset(void) {
+    dirty_valid = false;
+}
+
+void desktop_dirty_mark(i32 x, i32 y, u32 width, u32 height) {
+    dirty_union(x, y, width, height);
+}
+
+void desktop_dirty_mark_full(void) {
+    dirty_valid = true;
+    dirty_x = 0;
+    dirty_y = 0;
+    dirty_width = 800;
+    dirty_height = 600;
+}
+
+bool desktop_dirty_take(i32 *x, i32 *y, u32 *width, u32 *height) {
+    if (!dirty_valid) {
+        return false;
+    }
+    if (x != NULL) {
+        *x = dirty_x;
+    }
+    if (y != NULL) {
+        *y = dirty_y;
+    }
+    if (width != NULL) {
+        *width = dirty_width;
+    }
+    if (height != NULL) {
+        *height = dirty_height;
+    }
+    dirty_valid = false;
+    return true;
+}
 
 static void set_action(const char *text) {
     strncpy(last_action, text, sizeof(last_action) - 1);
@@ -81,6 +168,7 @@ static void draw_taskbar(void) {
 
 void desktop_init(struct gfx_surface *surface) {
     desktop_target = surface;
+    desktop_dirty_reset();
     exit_requested = false;
     click_count = 0;
     render_count = 0;
@@ -272,6 +360,7 @@ int desktop_open_app(u32 index) {
     if (apps[index].open) {
         wm_raise(apps[index].id);
         wm_set_visible(apps[index].id, true);
+        desktop_dirty_mark_full();
         return 0;
     }
     i32 x = 150 + (i32)index * 40;
@@ -285,6 +374,7 @@ int desktop_open_app(u32 index) {
     apps[index].id = window->id;
     apps[index].open = true;
     apps[index].visible = true;
+    desktop_dirty_mark_full();
     char action[48];
     ksnprintf(action, sizeof(action), "opened %s", apps[index].name);
     set_action(action);
@@ -299,6 +389,7 @@ int desktop_close_app(u32 index) {
     apps[index].open = false;
     apps[index].visible = false;
     apps[index].id = 0;
+    desktop_dirty_mark_full();
     set_action("window closed");
     return 0;
 }
@@ -327,8 +418,21 @@ bool desktop_handle_mouse(const struct mouse_event *event) {
     }
     if (event->type == MOUSE_EVENT_MOVE) {
         if (dragging_id != 0) {
-            wm_move_to((u32)dragging_id, event->x - drag_offset_x, event->y - drag_offset_y);
-            set_action("window dragged");
+            struct wm_window *window = wm_find((u32)dragging_id);
+            if (window != NULL) {
+                i32 old_x = window->x;
+                i32 old_y = window->y;
+                u32 width = window->width;
+                u32 height = window->height;
+                wm_move_to((u32)dragging_id, event->x - drag_offset_x,
+                           event->y - drag_offset_y);
+                if (window->x != old_x || window->y != old_y) {
+                    dirty_union(old_x, old_y, width, height);
+                    dirty_union(window->x, window->y, width, height);
+                    set_action("window dragged");
+                    return true;
+                }
+            }
         }
         return false;
     }
@@ -356,11 +460,13 @@ bool desktop_handle_mouse(const struct mouse_event *event) {
         if (apps[app_index].visible) {
             wm_set_visible(apps[app_index].id, false);
             apps[app_index].visible = false;
+            desktop_dirty_mark_full();
             set_action("window hidden");
         } else {
             wm_set_visible(apps[app_index].id, true);
             apps[app_index].visible = true;
             wm_raise(apps[app_index].id);
+            desktop_dirty_mark_full();
             set_action("window shown");
         }
         return true;
@@ -397,9 +503,11 @@ bool desktop_handle_mouse(const struct mouse_event *event) {
         dragging_id = (i32)id;
         drag_offset_x = x - window->x;
         drag_offset_y = y - window->y;
+        desktop_dirty_mark_full();
         set_action("window drag started");
         return true;
     }
+    desktop_dirty_mark_full();
     set_action("window focused");
     return true;
 }

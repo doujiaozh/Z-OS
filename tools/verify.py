@@ -95,7 +95,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=253 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=267 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -826,13 +826,56 @@ def run_gui():
         monitor.command("mouse_button 0", timeout=1)
         session.wait_for("gui: window dragged", 15)
         print("gui mouse click and drag events PASS")
+        frame_match = None
         session.send_line("exit")
         session.wait_for("gui: exited desktop", 20)
+        frame_matches = re.findall(r"gui: frames full=(\d+) dirty=(\d+) moves=(\d+) move_full=(\d+)",
+                                   session.snapshot().decode("utf-8", errors="replace"))
+        if not frame_matches:
+            raise CheckFailure("gui did not report frame statistics")
+        frame_match = [int(value) for value in frame_matches[-1]]
+        full_frames, dirty_frames, move_events, move_full_frames = frame_match
+        if move_events < 4:
+            raise CheckFailure("gui did not report enough mouse movement frames")
+        if move_full_frames != 0:
+            raise CheckFailure("gui repainted the full screen during mouse movement")
+        if dirty_frames < 1:
+            raise CheckFailure("gui never used a dirty rectangle present")
+        print("gui double buffer statistics PASS")
         session.wait_for("z-os:", 20)
         time.sleep(0.5)
         text = monitor.vga_text()
         if "Z-OS" not in text and "z-os" not in text:
             raise CheckFailure("gui exit did not restore the text console")
+        text_shot = BUILD / "gui-textmode.ppm"
+        monitor.screendump(text_shot)
+        text_ppm = read_ppm(text_shot)
+        text_width, text_height, text_pixels = text_ppm
+        light_pixels = 0
+        dark_pixels = 0
+        white_line_rows = 0
+        for row in range(text_height):
+            row_light = 0
+            for column in range(text_width):
+                offset = (row * text_width + column) * 3
+                red = text_pixels[offset]
+                green = text_pixels[offset + 1]
+                blue = text_pixels[offset + 2]
+                if red > 200 and green > 200 and blue > 200:
+                    row_light += 1
+                if red < 40 and green < 40 and blue < 40:
+                    dark_pixels += 1
+            light_pixels += row_light
+            if row_light > int(text_width * 0.8):
+                white_line_rows += 1
+        total_pixels = text_width * text_height
+        if white_line_rows != 0:
+            raise CheckFailure("gui exit left " + str(white_line_rows) + " white line rows on the text screen")
+        if light_pixels > int(total_pixels * 0.1):
+            raise CheckFailure("gui exit text screen is not mostly dark")
+        if dark_pixels < int(total_pixels * 0.5):
+            raise CheckFailure("gui exit text screen lost its dark background")
+        print("gui exit text screen is a clean text console PASS")
         start = len(session.snapshot())
         session.send_line("cat /README")
         prompt = session.wait_for("z-os:", 10, start + 12)

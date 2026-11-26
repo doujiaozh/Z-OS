@@ -65,11 +65,15 @@ exit device. A successful run returns host exit status 33, which is
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=253 failed=0
+ZTEST SUMMARY passed=267 failed=0
 ZTEST RESULT PASS
 ```
 
-The original 194 checks remain in place. This milestone adds 59 checks
+The original 253 checks remain in place. This milestone adds 14 checks
+covering double buffer allocation, partial and full frame presentation, dirty
+rectangle merging, VGA CRTC timing readback, sequencer clocking readback,
+graphics controller readback, attribute controller text mode state, font plane
+reload and text buffer usability after a graphics session.
 covering ATA identification and sector round trips, ZFS format, mount, file
 write, read, metadata reload, VFS attach and removal, mouse event queue
 semantics, the text-mode pointer overlay, window frames, close buttons, title
@@ -111,6 +115,8 @@ Test coverage by area:
 | Window frames | Frame composition, title bar pixels, close button pixels, close hit test, title hit separation, window under point, raise z-order, reaping |
 | Desktop | Status bar, taskbar, wallpaper, icon hit test, icon click opens window, drag start, drag motion, drag release, close button, taskbar exit |
 | GUI mode | Framebuffer mode set, surface access, status bar, taskbar, wallpaper pixels, graphics mouse mode, text mode restore |
+| Buffering | Double buffer surface, dirty rectangle present, untouched pixels, full present, damaged region merge |
+| VGA restore | Buffer release, CRTC horizontal timing, CRTC vertical timing, sequencer clocking, graphics controller mode, attribute text mode, font plane byte, text buffer cell |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
