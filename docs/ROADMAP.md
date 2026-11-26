@@ -9,17 +9,19 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.7.0 is the Network stage. It boots, manages memory, runs
+Z-OS 0.8.0 is the Transport stage. It boots, manages memory, runs
 preemptive kernel threads, hosts a VFS, ATA storage and shell, schedules Ring 3
 ELF64 processes, implements POSIX primitives, and adds an ATA PIO block driver
 with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
 provides mouse events, a text-mode pointer, window frames with dragging and
 close buttons, and a modern desktop with status bar, taskbar, icons and hit
 tested interaction, plus a GUI session that returns to a fully restored VGA
-text console. It also drives a PCI e1000 network adapter and implements ARP, IPv4, ICMP and
-UDP with socket system calls verified against QEMU user mode networking. It
-verifies itself under QEMU with 301 in-kernel checks plus cross-reboot storage
-replay, network round trips, desktop, double buffering and VGA restore tests.
+text console. It also drives a PCI e1000 network adapter with ARP, IPv4, ICMP, UDP, a TCP
+transport with handshake, sliding window and retransmission, and a DNS client,
+verified against host services through QEMU user mode networking. It verifies
+itself under QEMU with 322 in-kernel checks plus cross-reboot storage replay,
+network round trips, TCP and DNS exchanges, desktop, double buffering and VGA
+restore tests.
 
 ## Phase 1 execution status
 
@@ -42,7 +44,8 @@ replay, network round trips, desktop, double buffering and VGA restore tests.
 | Modern desktop shell with mouse events and hit testing | Implemented and verified | v0.6.0-storage |
 | Graphical session switching back to VGA text mode | Implemented and verified | v0.6.0-storage |
 | Network stack, TCP/IP, and a socket API | Implemented for ARP, IPv4, ICMP, UDP | v0.7.0-network |
-| TCP, DNS, DHCP and a POSIX socket ABI | Planned, next | v0.8.0-tcp |
+| TCP with handshake, window, retransmission and DNS client | Implemented and verified | v0.8.0-tcp |
+| DHCP, DNS cache, HTTP client and a POSIX socket ABI | Planned, next | v0.9.0-internet |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -52,7 +55,7 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.7.0 Network | Needed for general purpose |
+| Domain | 0.8.0 Transport | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
@@ -68,7 +71,7 @@ claimed as complete.
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 301 boot tests, storage, network, desktop and buffering checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 322 boot tests, storage, network, tcp, desktop and buffering checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -102,15 +105,17 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v0.7.0-network delivered PCI enumeration, the e1000 driver with physical DMA
-rings, raw frame queues and interrupt plus polling reception, the ARP cache and
-resolution, IPv4 routing and checksums, ICMP echo request handling and ping,
-UDP port binding and datagram queues, socket descriptors with five new system
-calls, the netinfo, arp, ping and udp-echo shell commands, and a network
-verification stage that exercises real ARP, ICMP and UDP traffic through QEMU
-user mode networking. The remaining items below move networking toward TCP and
-a POSIX socket ABI, storage toward a real disk filesystem, and the desktop
-toward a user-space compositor.
+v0.8.0-tcp delivered the TCP transport with control blocks, passive and active
+open, a handshake state machine, sliding window transmission, timeout and fast
+retransmission, in-order receive reassembly, FIN teardown, the DNS client with
+configurable server and port, stream sockets in the socket layer, system calls
+for connect, accept, recv, send and dns, the dns, dnsserver, dnsport, tcptest,
+tcplisten and nettest2 shell and ring 3 interfaces, and a verification stage
+that performs a TCP handshake, an HTTP request and response over TCP, a DNS
+resolution and a ring 3 TCP exchange through QEMU user mode networking. The
+remaining items below move networking toward DHCP, a DNS cache and a POSIX
+socket ABI, storage toward a real disk filesystem, and the desktop toward a
+user-space compositor.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -313,8 +318,8 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add TCP with reliable streams, then DNS and DHCP client support.
-2. Add a complete POSIX socket ABI with blocking and non-blocking modes.
+1. Add DHCP, a DNS cache, an HTTP client and a complete POSIX socket ABI.
+2. Add TLS style transport security and a certificate store.
 3. Replace polled ATA with DMA, add partitions, journaling and checksums.
 4. Move the desktop to a user-space compositor client with damage tracking.
 5. Add sessions, process groups, job control and a complete POSIX ABI with libc.

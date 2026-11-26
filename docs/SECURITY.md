@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.7.0 Network. It is deliberately conservative. The system is a development
+0.8.0 Transport. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -94,6 +94,11 @@ prototype and must not be used to protect sensitive data.
 - The network stack validates Ethernet length, IPv4 version, header length,
   total length and header checksum before dispatching, and bounds every
   protocol payload by the IPv4 total length.
+- TCP validates the segment header length, the pseudo header checksum, the peer
+  window and the sequence ranges before touching buffers; the receive buffer is
+  bounded and out of order data is acknowledged but not stored.
+- Sockets validate every user buffer and cap TCP transfers at 2048 bytes per
+  call; DNS names, query sizes and response sizes are bounded.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -107,6 +112,21 @@ prototype and must not be used to protect sensitive data.
 Each process owns a private PML4 and user page tables, and user frames are not
 shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
+
+Transport surfaces are not yet a security boundary:
+
+- TCP has no SYN flood mitigation, no randomized initial sequence numbers
+  beyond a monotonic counter, no connection rate limiting and no per-process
+  ownership of control blocks.
+- Retransmission is driven by network polling, so connections stall when no
+  polling thread runs; there is no keepalive and no TIME_WAIT table bounded by
+  memory pressure.
+- DNS responses are not authenticated; the client accepts any response whose
+  transaction identifier matches and does not check the source address beyond
+  the UDP socket demultiplexing.
+- Stream sockets share the global socket table with datagram sockets, so the
+  same descriptor ownership weaknesses apply.
+- There is no TLS, no certificate validation and no HTTP client hardening.
 
 Network surfaces are not yet a security boundary:
 
@@ -286,17 +306,20 @@ ELF validation, syscall pointer validation in the process address space,
 descriptor table isolation across fork, credential permission checks, signal
 frame validation and CR3 switching, blocking wait restart, ATA range checks,
 ZFS superblock validation, e1000 DMA buffer ownership, IPv4 header validation,
-ARP and UDP bounds checks, mouse packet decoding and bounds clamping, text
-pointer save and restore, compositor layering, desktop hit testing, process
-reaping, and exception containment are implemented and tested.
+TCP checksum and sequence validation, ARP, UDP and DNS bounds checks, mouse
+packet decoding and bounds clamping, text pointer save and restore, compositor
+layering, desktop hit testing, process reaping, and exception containment are
+implemented and tested.
 
 ## Hardening priorities
 
-1. Socket ownership per process, socket close on exit and a bounded receive
-   path with ICMP error reporting.
-2. Network input validation hardening: ARP cache limits with aging, TTL
+1. TCP hardening: SYN backlog limits, randomized initial sequence numbers from
+   an entropy source, per-process socket ownership and socket close on exit.
+2. DNS response validation by source address and a bounded DNS cache with
+   negative caching disabled by default.
+3. Network input validation hardening: ARP cache limits with aging, TTL
    handling, fragment rejection policy and frame queue accounting.
-3. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
+4. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
    permissions and path validation.
 4. VFS owner and mode storage so credentials actually gate file access, plus
    a non-root default identity for spawned processes.

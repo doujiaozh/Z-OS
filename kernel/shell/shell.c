@@ -3,11 +3,13 @@
 #include "console.h"
 #include "arp.h"
 #include "desktop.h"
+#include "dns.h"
 #include "e1000.h"
 #include "icmp.h"
 #include "ipv4.h"
 #include "net.h"
 #include "socket.h"
+#include "tcp.h"
 #include "udp.h"
 #include "syscall.h"
 #include "fb.h"
@@ -239,6 +241,12 @@ static void command_help(void) {
     kprintf("  arp <ip>             resolve an ipv4 address to a mac address\n");
     kprintf("  ping <ip>            send four icmp echo requests\n");
     kprintf("  udp-echo <port>      bind a udp port and echo one datagram\n");
+    kprintf("  dns <domain>         resolve a domain name through the dns server\n");
+    kprintf("  dnsserver <ip>       set the dns server address\n");
+    kprintf("  dnsport <port>       set the dns server port\n");
+    kprintf("  tcptest <ip> <port> [http]  open a tcp connection and exchange data\n");
+    kprintf("  tcplisten <port>     listen for one tcp connection and echo it\n");
+    kprintf("  nettest2             run the ring 3 tcp client test program\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -997,6 +1005,154 @@ static void command_udp_echo(int argc, char *arguments[]) {
     socket_close(descriptor);
 }
 
+static void command_dnsserver(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: dnsserver <ip>\n");
+        return;
+    }
+    u32 address = net_parse_ip(arguments[1]);
+    if (address == 0) {
+        kprintf("dnsserver: invalid address\n");
+        return;
+    }
+    struct net_config *config = (struct net_config *)net_config_get();
+    config->dns = address;
+    kprintf("dnsserver: dns server set to %s\n", arguments[1]);
+}
+
+static void command_dnsport(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: dnsport <port>\n");
+        return;
+    }
+    u32 port = parse_decimal(arguments[1], 0);
+    if (port == 0 || port > 65535) {
+        kprintf("dnsport: invalid port\n");
+        return;
+    }
+    struct net_config *config = (struct net_config *)net_config_get();
+    config->dns_port = (u16)port;
+    kprintf("dnsport: dns server port set to %u\n", port);
+}
+
+static void command_dns(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: dns <domain>\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("dns: network is not ready\n");
+        return;
+    }
+    u32 address = 0;
+    if (dns_resolve(arguments[1], &address, 3000) != 0) {
+        kprintf("dns: failed to resolve %s\n", arguments[1]);
+        return;
+    }
+    char ip_text[20];
+    net_format_ip(address, ip_text, sizeof(ip_text));
+    kprintf("dns: %s resolved to %s\n", arguments[1], ip_text);
+}
+
+static void command_tcptest(int argc, char *arguments[]) {
+    if (argc < 3) {
+        kprintf("usage: tcptest <ip> <port>\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("tcp: network is not ready\n");
+        return;
+    }
+    u32 address = net_parse_ip(arguments[1]);
+    u16 port = (u16)parse_decimal(arguments[2], 0);
+    if (address == 0 || port == 0) {
+        kprintf("tcp: invalid address or port\n");
+        return;
+    }
+    int descriptor = socket_create(SOCKET_AF_INET, SOCKET_SOCK_STREAM, 0);
+    if (descriptor < 0) {
+        kprintf("tcp: socket creation failed\n");
+        return;
+    }
+    u64 started = timer_uptime_ms();
+    if (socket_connect(descriptor, address, port, 3000) != 0) {
+        kprintf("tcp: connection to %s:%u failed\n", arguments[1], port);
+        socket_close(descriptor);
+        return;
+    }
+    kprintf("tcp: connected to %s:%u in %llu ms\n", arguments[1], port,
+            timer_uptime_ms() - started);
+    bool http_mode = argc >= 4 && strcmp(arguments[3], "http") == 0;
+    const char *request = http_mode ? "GET / HTTP/1.0\r\nHost: z-os\r\n\r\n" : "PING\r\n";
+    u32 request_length = (u32)strlen(request);
+    socket_send(descriptor, request, request_length);
+    u8 buffer[512];
+    int received = socket_recv(descriptor, buffer, sizeof(buffer), 3000);
+    if (received < 0) {
+        kprintf("tcp: no response from remote host\n");
+    } else {
+        kprintf("tcp: received %d bytes: ", received);
+        for (int index = 0; index < received && index < 160; index++) {
+            char character = (char)buffer[index];
+            kprintf("%c", character >= 32 && character <= 126 ? character : '.');
+        }
+        kprintf("\n");
+    }
+    socket_close(descriptor);
+}
+
+static void command_tcplisten(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: tcplisten <port> [timeout-ms]\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("tcp: network is not ready\n");
+        return;
+    }
+    u16 port = (u16)parse_decimal(arguments[1], 0);
+    u32 timeout_ms = argc >= 3 ? parse_decimal(arguments[2], 5000) : 5000;
+    if (port == 0) {
+        kprintf("tcp: invalid port\n");
+        return;
+    }
+    int listener = socket_create(SOCKET_AF_INET, SOCKET_SOCK_STREAM, 0);
+    if (listener < 0 || socket_bind(listener, 0, port) != 0) {
+        kprintf("tcp: listen failed\n");
+        if (listener > 0) {
+            socket_close(listener);
+        }
+        return;
+    }
+    kprintf("tcp: listening on port %u\n", port);
+    int accepted = socket_accept(listener, timeout_ms);
+    if (accepted < 0) {
+        kprintf("tcp: accept timeout\n");
+        socket_close(listener);
+        return;
+    }
+    kprintf("tcp: accepted connection\n");
+    u8 buffer[512];
+    int received = socket_recv(accepted, buffer, sizeof(buffer), timeout_ms);
+    if (received > 0) {
+        kprintf("tcp: server received %d bytes\n", received);
+        socket_send(accepted, buffer, (u32)received);
+        kprintf("tcp: server echoed %d bytes\n", received);
+    }
+    socket_close(accepted);
+    socket_close(listener);
+}
+
+static void command_nettest2(void) {
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("nettest2", user_nettest2_start, user_nettest2_end, &status);
+    if (pid == 0) {
+        kprintf("nettest2: program failed to run\n");
+        return;
+    }
+    kprintf("nettest2: exit status %llu\n", status);
+}
+
 static void command_mouse(void) {
     struct mouse_state state;
     mouse_get_state(&state);
@@ -1351,6 +1507,18 @@ static void execute_command(int argc, char *arguments[]) {
         command_ping(argc, arguments);
     } else if (strcmp(command, "udp-echo") == 0) {
         command_udp_echo(argc, arguments);
+    } else if (strcmp(command, "dns") == 0) {
+        command_dns(argc, arguments);
+    } else if (strcmp(command, "dnsserver") == 0) {
+        command_dnsserver(argc, arguments);
+    } else if (strcmp(command, "dnsport") == 0) {
+        command_dnsport(argc, arguments);
+    } else if (strcmp(command, "tcptest") == 0) {
+        command_tcptest(argc, arguments);
+    } else if (strcmp(command, "tcplisten") == 0) {
+        command_tcplisten(argc, arguments);
+    } else if (strcmp(command, "nettest2") == 0) {
+        command_nettest2();
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

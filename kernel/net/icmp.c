@@ -112,7 +112,7 @@ int icmp_ping(u32 destination, u32 timeout_ms, u32 *round_trip_ms) {
             }
             return 0;
         }
-        sched_sleep_ms(10);
+        net_delay_ms(10);
     }
     return -1;
 }

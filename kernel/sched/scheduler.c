@@ -218,6 +218,10 @@ void sched_sleep_ticks(u64 ticks) {
     irq_restore(flags);
 }
 
+bool sched_in_thread_context(void) {
+    return current_thread != NULL;
+}
+
 void sched_sleep_ms(u64 milliseconds) {
     u64 frequency = timer_frequency();
     u64 ticks = (milliseconds * frequency + 999) / 1000;

@@ -5,6 +5,7 @@
 
 #define SOCKET_MAX 8
 #define SOCKET_AF_INET 2
+#define SOCKET_SOCK_STREAM 1
 #define SOCKET_SOCK_DGRAM 2
 
 void socket_init(void);
@@ -18,5 +19,9 @@ bool socket_valid(int descriptor);
 u32 socket_port(int descriptor);
 u32 socket_count(void);
 u32 socket_bound_port(int descriptor);
+int socket_connect(int descriptor, u32 address, u16 port, u32 timeout_ms);
+int socket_accept(int descriptor, u32 timeout_ms);
+int socket_send(int descriptor, const void *data, u32 length);
+int socket_recv(int descriptor, void *buffer, u32 capacity, u32 timeout_ms);
 
 #endif

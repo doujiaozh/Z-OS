@@ -13,6 +13,8 @@ global user_postest_start
 global user_postest_end
 global user_guitest2_start
 global user_guitest2_end
+global user_nettest2_start
+global user_nettest2_end
 
 user_program_start:
     incbin "user_init.elf"
@@ -37,3 +39,7 @@ user_postest_end:
 user_guitest2_start:
     incbin "user_guitest2.elf"
 user_guitest2_end:
+
+user_nettest2_start:
+    incbin "user_nettest2.elf"
+user_nettest2_end:

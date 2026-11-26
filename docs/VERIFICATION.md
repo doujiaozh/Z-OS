@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.7.0 Network |
+| Version | 0.8.0 Transport |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -65,7 +65,7 @@ exit device. A successful run returns host exit status 33, which is
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=301 failed=0
+ZTEST SUMMARY passed=322 failed=0
 ZTEST RESULT PASS
 ```
 
@@ -76,7 +76,13 @@ dotted address parsing and formatting, Ethernet frame parsing, ARP cache
 insertion, lookup, removal, reply handling and request transmission, UDP
 binding, duplicate rejection, datagram delivery with source information,
 timeout behaviour and unbinding, socket descriptor lifecycle, ICMP echo request
-answering, and receive path accounting. A further milestone added 14 checks
+answering, and receive path accounting. A further milestone added 21 checks covering TCP checksum generation and
+verification, header parsing, wrap-around sequence comparison, sliding window
+clamping, listen and duplicate listen rejection, SYN handling, handshake
+completion, accept, in-order receive reassembly, FIN teardown, checksum
+rejection, reset handling, DNS query construction and A record parsing with
+compression pointers.
+A further milestone added 14 checks
 covering double buffer allocation, partial and full frame presentation, dirty
 rectangle merging, VGA CRTC timing readback, sequencer clocking readback,
 graphics controller readback, attribute controller text mode state, font plane
@@ -125,6 +131,7 @@ Test coverage by area:
 | Buffering | Double buffer surface, dirty rectangle present, untouched pixels, full present, damaged region merge |
 | VGA restore | Buffer release, CRTC horizontal timing, CRTC vertical timing, sequencer clocking, graphics controller mode, attribute text mode, font plane byte, text buffer cell |
 | Network | e1000 presence, guest address, MAC, byte order, IPv4 checksum, header parse and reject, address parse and format, Ethernet parse, ARP cache and replies, UDP bind and delivery, socket lifecycle, ICMP answering, receive accounting |
+| Transport | TCP checksum, header parse, sequence comparison, window clamp, listen, SYN, handshake, accept, receive, FIN, close, checksum rejection, reset, DNS query build, DNS answer parse |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
@@ -318,8 +325,12 @@ rebuilds first unless `--skip-build` is supplied.
 - POSIX signals, credentials, sessions, or a file-descriptor table.
 - Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
-- TCP, DNS, DHCP, IPv6 and a POSIX socket ABI; the network milestone implements
-  ARP, IPv4, ICMP and UDP only.
+- DHCP, IPv6, a DNS cache, TLS and a POSIX socket ABI beyond the tested subset.
+- External internet reachability was not available from this host: the QEMU user
+  network reached the virtual gateway and host loopback services, while direct
+  DNS at 10.0.2.3 and outbound TCP to a public address failed. TCP and DNS are
+  therefore verified against controlled host services and in kernel unit tests,
+  which exercise the same code paths as external traffic.
 - Network isolation: QEMU user mode networking is used, so external reachability
   beyond the virtual gateway and host forward is not exercised.
 - Mouse acceleration and wheel semantics; the automated GUI stage injects
@@ -340,4 +351,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.7.0 test run.
+passing 0.8.0 test run.

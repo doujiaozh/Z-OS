@@ -12,6 +12,7 @@
 #include "process.h"
 #include "sched.h"
 #include "signal.h"
+#include "dns.h"
 #include "socket.h"
 #include "string.h"
 #include "thread.h"
@@ -52,6 +53,11 @@
 #define SYS_SENDTO 29
 #define SYS_RECVFROM 30
 #define SYS_SOCKET_CLOSE 31
+#define SYS_CONNECT 32
+#define SYS_ACCEPT 33
+#define SYS_RECV 34
+#define SYS_SEND 35
+#define SYS_DNS 36
 
 static bool gui_enter_flag = false;
 static bool gui_exit_flag = false;
@@ -448,6 +454,68 @@ static u64 syscall_socket_close(struct registers *registers) {
     return 0;
 }
 
+static u64 syscall_connect(struct registers *registers) {
+    int result = socket_connect((int)registers->rdi, (u32)registers->rsi, (u16)registers->rdx, 3000);
+    if (result != 0) {
+        return (u64)(i64)-1;
+    }
+    return 0;
+}
+
+static u64 syscall_accept(struct registers *registers) {
+    int accepted = socket_accept((int)registers->rdi, (u32)registers->rsi);
+    if (accepted < 0) {
+        return (u64)(i64)-1;
+    }
+    return (u64)accepted;
+}
+
+static u64 syscall_recv(struct registers *registers) {
+    u64 buffer_address = registers->rsi;
+    u64 capacity = registers->rdx;
+    u32 timeout_ms = (u32)registers->r10;
+    if (capacity == 0 || capacity > 2048 || !syscall_buffer_valid(buffer_address, capacity)) {
+        return (u64)(i64)-1;
+    }
+    u8 buffer[2048];
+    int received = socket_recv((int)registers->rdi, buffer, (u32)capacity, timeout_ms);
+    if (received < 0) {
+        return (u64)(i64)-1;
+    }
+    memcpy((void *)(usize)buffer_address, buffer, (usize)received);
+    return (u64)received;
+}
+
+static u64 syscall_send(struct registers *registers) {
+    u64 buffer_address = registers->rsi;
+    u64 length = registers->rdx;
+    if (length == 0 || length > 2048 || !syscall_buffer_valid(buffer_address, length)) {
+        return (u64)(i64)-1;
+    }
+    u8 buffer[2048];
+    memcpy(buffer, (const void *)(usize)buffer_address, (usize)length);
+    int sent = socket_send((int)registers->rdi, buffer, (u32)length);
+    if (sent < 0) {
+        return (u64)(i64)-1;
+    }
+    return (u64)sent;
+}
+
+static u64 syscall_dns(struct registers *registers) {
+    char name[128];
+    if (!syscall_copy_string(name, registers->rdi, sizeof(name))) {
+        return (u64)(i64)-1;
+    }
+    u32 address = 0;
+    if (dns_resolve(name, &address, 2000) != 0) {
+        return (u64)(i64)-1;
+    }
+    if (registers->rsi != 0 && syscall_buffer_valid(registers->rsi, sizeof(u32))) {
+        memcpy((void *)(usize)registers->rsi, &address, sizeof(u32));
+    }
+    return (u64)address;
+}
+
 static u64 syscall_mouse(struct registers *registers) {
     u64 destination = registers->rdi;
     if (destination == 0 || !syscall_buffer_valid(destination, 16)) {
@@ -571,6 +639,21 @@ void syscall_dispatch(struct registers *registers) {
             break;
         case SYS_SOCKET_CLOSE:
             registers->rax = syscall_socket_close(registers);
+            break;
+        case SYS_CONNECT:
+            registers->rax = syscall_connect(registers);
+            break;
+        case SYS_ACCEPT:
+            registers->rax = syscall_accept(registers);
+            break;
+        case SYS_RECV:
+            registers->rax = syscall_recv(registers);
+            break;
+        case SYS_SEND:
+            registers->rax = syscall_send(registers);
+            break;
+        case SYS_DNS:
+            registers->rax = syscall_dns(registers);
             break;
         default:
             registers->rax = (u64)-1;

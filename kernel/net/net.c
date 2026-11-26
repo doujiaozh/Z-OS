@@ -6,6 +6,10 @@
 #include "ipv4.h"
 #include "lib.h"
 #include "string.h"
+#include "process.h"
+#include "tcp.h"
+#include "thread.h"
+#include "timer.h"
 #include "udp.h"
 
 static struct net_config config;
@@ -16,6 +20,7 @@ static u32 bytes_sent = 0;
 static u32 poll_count = 0;
 static u32 ipv4_sent_frames = 0;
 static u32 ipv4_received_frames = 0;
+static bool in_poll = false;
 
 u16 net_htons(u16 value) {
     return (u16)((value << 8) | (value >> 8));
@@ -113,6 +118,7 @@ void net_init(void) {
     ipv4_init();
     udp_init();
     icmp_init();
+    tcp_init();
     if (e1000_init() != 0) {
         config.ready = false;
         return;
@@ -121,6 +127,8 @@ void net_init(void) {
     config.ip = NET_IPV4(10, 0, 2, 15);
     config.gateway = NET_IPV4(10, 0, 2, 2);
     config.netmask = NET_IPV4(255, 255, 255, 0);
+    config.dns = NET_IPV4(10, 0, 2, 3);
+    config.dns_port = 53;
     config.mtu = NET_MTU;
     config.ready = true;
 }
@@ -139,6 +147,7 @@ void net_poll(void) {
     }
     poll_count++;
     e1000_poll();
+    in_poll = true;
     u8 frame[1600];
     for (u32 spin = 0; spin < 16; spin++) {
         u32 length = e1000_dequeue_frame(frame, sizeof(frame));
@@ -146,6 +155,31 @@ void net_poll(void) {
             break;
         }
         net_receive_frame(frame, length);
+    }
+    in_poll = false;
+    tcp_tick();
+}
+
+bool net_in_poll(void) {
+    return in_poll;
+}
+
+void net_delay_ms(u32 milliseconds) {
+    if (milliseconds == 0 || in_poll) {
+        return;
+    }
+    if (sched_in_thread_context() && process_current() == NULL) {
+        sched_sleep_ms(milliseconds);
+        return;
+    }
+    u64 frequency = timer_frequency();
+    u64 ticks = ((u64)milliseconds * frequency + 999) / 1000;
+    if (ticks == 0) {
+        ticks = 1;
+    }
+    u64 start = timer_ticks();
+    while (timer_ticks() - start < ticks) {
+        __asm__ volatile("sti; hlt; cli" : : : "memory");
     }
 }
 

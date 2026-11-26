@@ -30,6 +30,7 @@ void sched_start(void) __attribute__((noreturn));
 void sched_tick(void);
 void sched_yield(void);
 void sched_sleep_ms(u64 milliseconds);
+bool sched_in_thread_context(void);
 void sched_sleep_ticks(u64 ticks);
 void sched_preempt_disable(void);
 void sched_preempt_enable(void);

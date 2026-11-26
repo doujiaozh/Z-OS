@@ -4,6 +4,7 @@
 #include "compositor.h"
 #include "console.h"
 #include "cred.h"
+#include "dns.h"
 #include "desktop.h"
 #include "e1000.h"
 #include "eth.h"
@@ -27,6 +28,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "socket.h"
+#include "tcp.h"
 #include "waitq.h"
 #include "mouse.h"
 #include "rtc.h"
@@ -1404,6 +1406,159 @@ static void test_network(void)
     check(net_frames_received() == frames_before + 1,
           "network receive path accounts incoming frames");
 }
+static u32 tcp_build_segment(u8 *segment, u16 source_port, u16 destination_port,
+                             u32 sequence, u32 acknowledgement, u8 flags,
+                             const u8 *payload, u32 payload_length)
+{
+    memset(segment, 0, TCP_HEADER_SIZE + payload_length);
+    segment[0] = (u8)(source_port >> 8);
+    segment[1] = (u8)(source_port & 0xFF);
+    segment[2] = (u8)(destination_port >> 8);
+    segment[3] = (u8)(destination_port & 0xFF);
+    segment[4] = (u8)(sequence >> 24);
+    segment[5] = (u8)(sequence >> 16);
+    segment[6] = (u8)(sequence >> 8);
+    segment[7] = (u8)(sequence & 0xFF);
+    segment[8] = (u8)(acknowledgement >> 24);
+    segment[9] = (u8)(acknowledgement >> 16);
+    segment[10] = (u8)(acknowledgement >> 8);
+    segment[11] = (u8)(acknowledgement & 0xFF);
+    segment[12] = (u8)((TCP_HEADER_SIZE / 4) << 4);
+    segment[13] = flags;
+    segment[14] = 0x08;
+    segment[15] = 0x00;
+    if (payload != NULL && payload_length > 0) {
+        memcpy(segment + TCP_HEADER_SIZE, payload, payload_length);
+    }
+    u32 length = TCP_HEADER_SIZE + payload_length;
+    u16 checksum = (u16)tcp_checksum(NET_IPV4(10, 0, 2, 2), net_config_get()->ip, segment, length);
+    segment[16] = (u8)(checksum >> 8);
+    segment[17] = (u8)(checksum & 0xFF);
+    return length;
+}
+
+static void test_tcp(void)
+{
+    const struct net_config *config = net_config_get();
+    u8 segment[TCP_HEADER_SIZE + 32];
+    memset(segment, 0, sizeof(segment));
+    const u8 payload[8] = {'Z', '-', 'O', 'S', 'T', 'C', 'P', '!'};
+    u32 length = tcp_build_segment(segment, 1234, 80, 1000, 2000, TCP_FLAG_ACK, payload, 8);
+    check(length == TCP_HEADER_SIZE + 8 &&
+          tcp_checksum(NET_IPV4(10, 0, 2, 2), config->ip, segment, length) == 0,
+          "tcp checksum verifies a complete segment");
+    struct tcp_header_view view;
+    check(tcp_parse_header(segment, length, &view) && view.source_port == 1234 &&
+          view.destination_port == 80 && view.sequence == 1000 &&
+          view.acknowledgement == 2000 && (view.flags & TCP_FLAG_ACK) != 0,
+          "tcp header parser extracts sequence and flags");
+    check(tcp_seq_less(0xFFFFFFF0U, 0x00000010U) && tcp_seq_less(0x10, 0x20) &&
+          !tcp_seq_less(0x20, 0x10), "tcp sequence comparison handles wrap around");
+    check(tcp_window_clamp(1000, 200, 2000, 536) == 536 &&
+          tcp_window_clamp(1000, 900, 1000, 536) == 100 &&
+          tcp_window_clamp(100, 100, 1000, 536) == 0,
+          "tcp sliding window clamps to the smallest bound");
+    tcp_init();
+    tcp_test_set_transmit(false);
+    int listener = tcp_listen(4000);
+    check(listener > 0 && tcp_state_of(listener) == TCP_STATE_LISTEN,
+          "tcp listen creates a listening connection");
+    check(tcp_listen(4000) < 0, "tcp rejects duplicate listen ports");
+    u32 syn_length = tcp_build_segment(segment, 9000, 4000, 1000, 0, TCP_FLAG_SYN, NULL, 0);
+    tcp_receive(segment, syn_length, NET_IPV4(10, 0, 2, 2));
+    check(tcp_connection_count() == 2, "tcp syn creates a pending connection");
+    int child = -1;
+    for (u32 index = 0; index < TCP_MAX_CONNECTIONS; index++) {
+        int candidate = (int)index + 1;
+        if (candidate != listener && tcp_state_of(candidate) != TCP_STATE_CLOSED &&
+            tcp_local_port(candidate) == 4000) {
+            child = candidate;
+        }
+    }
+    check(child > 0 && tcp_state_of(child) == TCP_STATE_SYN_RECV,
+          "tcp syn moves the connection to syn received");
+    u32 child_sequence = tcp_test_send_sequence(child);
+    u32 ack_length = tcp_build_segment(segment, 9000, 4000, 1001, child_sequence, TCP_FLAG_ACK, NULL, 0);
+    tcp_receive(segment, ack_length, NET_IPV4(10, 0, 2, 2));
+    check(tcp_state_of(child) == TCP_STATE_ESTABLISHED,
+          "tcp handshake completes into the established state");
+    int accepted = tcp_accept(listener, 100);
+    check(accepted == child && tcp_state_of(accepted) == TCP_STATE_ESTABLISHED,
+          "tcp accept returns the established connection");
+    u32 receive_sequence = tcp_test_receive_sequence(accepted);
+    u32 data_length = tcp_build_segment(segment, 9000, 4000, receive_sequence, child_sequence,
+                                        TCP_FLAG_ACK | TCP_FLAG_PSH, (const u8 *)"HELLO", 5);
+    tcp_receive(segment, data_length, NET_IPV4(10, 0, 2, 2));
+    char received[16];
+    memset(received, 0, sizeof(received));
+    int received_length = tcp_recv(accepted, received, sizeof(received), 100);
+    check(received_length == 5 && strcmp(received, "HELLO") == 0,
+          "tcp receive reassembles in order payload data");
+    u32 fin_sequence = tcp_test_receive_sequence(accepted);
+    u32 fin_length = tcp_build_segment(segment, 9000, 4000, fin_sequence, child_sequence,
+                                       TCP_FLAG_FIN | TCP_FLAG_ACK, NULL, 0);
+    tcp_receive(segment, fin_length, NET_IPV4(10, 0, 2, 2));
+    check(tcp_state_of(accepted) == TCP_STATE_CLOSE_WAIT,
+          "tcp fin moves the connection to close wait");
+    check(tcp_recv(accepted, received, sizeof(received), 100) == 0,
+          "tcp receive reports end of stream after fin");
+    check(tcp_close(accepted) == 0, "tcp close tears down the accepted connection");
+    check(tcp_close(listener) == 0, "tcp close tears down the listener");
+    u32 errors_before = tcp_checksum_errors();
+    u8 corrupted[TCP_HEADER_SIZE + 8];
+    memcpy(corrupted, segment, sizeof(corrupted));
+    corrupted[TCP_HEADER_SIZE] ^= 0xFF;
+    tcp_receive(corrupted, TCP_HEADER_SIZE + 8, NET_IPV4(10, 0, 2, 2));
+    check(tcp_checksum_errors() == errors_before + 1,
+          "tcp receive rejects segments with bad checksums");
+    int resetting = tcp_test_open_syn_sent(NET_IPV4(10, 0, 2, 2), 8080);
+    check(resetting > 0 && tcp_state_of(resetting) == TCP_STATE_SYN_SENT,
+          "tcp active open starts in syn sent");
+    u32 rst_length = tcp_build_segment(segment, 8080, (u16)tcp_local_port(resetting), 5000, 0,
+                                       TCP_FLAG_RST, NULL, 0);
+    tcp_receive(segment, rst_length, NET_IPV4(10, 0, 2, 2));
+    check(tcp_state_of(resetting) == TCP_STATE_CLOSED,
+          "tcp reset closes a pending connection");
+    tcp_test_set_transmit(true);
+    u8 query[DNS_MAX_MESSAGE];
+    memset(query, 0, sizeof(query));
+    u32 query_length = dns_build_query("example.com", query, sizeof(query));
+    check(query_length == 29 && query[12] == 7 && query[20] == 3 &&
+          memcmp(query + 13, "example", 7) == 0 && memcmp(query + 21, "com", 3) == 0,
+          "dns builds a valid a record query");
+    u8 response[DNS_MAX_MESSAGE];
+    memset(response, 0, sizeof(response));
+    memcpy(response, query, 12);
+    response[2] = 0x81;
+    response[3] = 0x80;
+    response[6] = 0;
+    response[7] = 1;
+    u32 response_length = 12;
+    memcpy(response + response_length, query + 12, query_length - 12);
+    response_length += query_length - 12;
+    response[response_length++] = 0xC0;
+    response[response_length++] = 0x0C;
+    response[response_length++] = 0;
+    response[response_length++] = 1;
+    response[response_length++] = 0;
+    response[response_length++] = 1;
+    response[response_length++] = 0;
+    response[response_length++] = 0;
+    response[response_length++] = 0;
+    response[response_length++] = 60;
+    response[response_length++] = 0;
+    response[response_length++] = 4;
+    response[response_length++] = 93;
+    response[response_length++] = 184;
+    response[response_length++] = 216;
+    response[response_length++] = 34;
+    u32 resolved = 0;
+    check(dns_parse_response(response, response_length, 0x2000, &resolved) &&
+          resolved == NET_IPV4(93, 184, 216, 34),
+          "dns parses an a record answer with name compression");
+    check(!dns_parse_response(response, response_length, 0x2001, &resolved),
+          "dns rejects responses with mismatched identifiers");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1437,6 +1592,7 @@ void selftest_thread(void *argument)
     test_gui_mode();
     test_vga_text_restore();
     test_network();
+    test_tcp();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

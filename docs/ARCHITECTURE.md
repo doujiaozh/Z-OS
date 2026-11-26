@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.7.0 implementation as it exists in this
+This document describes the Z-OS 0.8.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.7.0:
+Non-goals for 0.8.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -37,6 +37,7 @@ Non-goals for 0.7.0:
 | Mouse | PS/2 auxiliary device, interrupt vector 44 |
 | Storage | ATA primary channel polled PIO at 0x1F0, control 0x3F6 |
 | Network | PCI e1000 82540EM, MMIO BAR, RX and TX descriptor rings, IRQ line from PCI config |
+| Transport | TCP control blocks, delayed acknowledgements not implemented, retransmission timer from network polling |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
 
@@ -586,6 +587,11 @@ Syscall ABI:
 | 29 | sendto | RDI=fd, RSI=address, RDX=port, R10=data, R8=length | bytes sent or -1 |
 | 30 | recvfrom | RDI=fd, RSI=buffer, RDX=capacity, R10=timeout, R8=source ip out, R9=source port out | bytes received or -1 |
 | 31 | socket_close | RDI=descriptor | 0 or -1 |
+| 32 | connect | RDI=fd, RSI=address, RDX=port | 0 or -1 |
+| 33 | accept | RDI=fd, RSI=timeout | new descriptor or -1 |
+| 34 | recv | RDI=fd, RSI=buffer, RDX=capacity, R10=timeout | bytes or -1 |
+| 35 | send | RDI=fd, RSI=buffer, RDX=length | bytes or -1 |
+| 36 | dns | RDI=name, RSI=address out | address or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -866,6 +872,53 @@ before copying.
 Shell commands `netinfo`, `arp`, `ping` and `udp-echo` expose the stack, and
 `udp-echo` can be driven from a host through a QEMU user mode UDP host forward,
 which is how the automated network stage performs a real round trip.
+
+## TCP transport
+
+`kernel/net/tcp.c` implements a minimal reliable stream transport:
+
+- Eight control blocks with local and remote address and port, send and receive
+  sequence numbers, a sliding send window, a 2048 byte reassembly buffer and a
+  2048 byte send buffer. States cover CLOSED, LISTEN, SYN_SENT, SYN_RECV,
+  ESTABLISHED, FIN_WAIT_1, FIN_WAIT_2, CLOSE_WAIT, LAST_ACK, TIME_WAIT and
+  CLOSING.
+- Segments carry the standard 20 byte header. The checksum covers a 12 byte
+  pseudo header (source, destination, zero, protocol, length) plus the segment.
+- Passive open: `tcp_listen` creates a listener, an incoming SYN allocates a
+  child control block in SYN_RECV and answers with SYN-ACK, and the completing
+  ACK moves the child to ESTABLISHED. `tcp_accept` returns an established child
+  that has not been accepted yet.
+- Active open: `tcp_connect` sends SYN from a fresh initial sequence number,
+  waits for a matching SYN-ACK and completes the handshake with an ACK.
+- Transmission: `tcp_send` appends to the send buffer and flushes segments
+  limited by the minimum of the peer window, the unsent bytes and the maximum
+  segment size. Acknowledgements advance the unacknowledged sequence, discard
+  the matching prefix of the send buffer and trigger more flushes.
+- Retransmission: `tcp_tick` runs from `net_poll` and, when unacknowledged data
+  or a handshake control segment is pending past the retransmission timeout,
+  retransmits the oldest segment and backs the timeout off. Three duplicate
+  acknowledgements trigger an immediate fast retransmission. The retry counter
+  aborts the connection after six attempts.
+- Reception accepts only in-order payload at the receive sequence, appends it
+  to the reassembly buffer, acknowledges every segment and advances on FIN to
+  CLOSE_WAIT or TIME_WAIT. Checksum failures are counted and dropped.
+- `tcp_recv` polls the network until data is reassembled, a FIN arrives or the
+  timeout expires; `tcp_close` performs the FIN handshake with bounded waits.
+
+Waiting inside the network stack must work in both kernel thread context and
+inside a system call made by a ring 3 process. `net_delay_ms` uses the thread
+scheduler when a kernel thread is current and a halt based wait when a user
+process is executing a syscall, because the thread scheduler is suspended while
+a user batch runs. Protocol processing is never re-entered from a delay loop.
+
+## DNS client
+
+`kernel/net/dns.c` builds recursive A record queries with label encoded names,
+sends them from an ephemeral UDP port to the configured DNS server (10.0.2.3 by
+default, settable at runtime with `dnsserver` and `dnsport`) and parses the
+response: transaction identifier, response bit, result code, question skipping
+and answer iteration with compression pointer support. The first A record with
+class IN yields the IPv4 address.
 
 ## Console and shell
 

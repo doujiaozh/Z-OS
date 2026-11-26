@@ -211,7 +211,7 @@ int udp_recv(u32 index, void *buffer, u32 capacity, u32 timeout_ms,
             return (int)length;
         }
         net_poll();
-        sched_sleep_ms(10);
+        net_delay_ms(10);
     }
     return -1;
 }

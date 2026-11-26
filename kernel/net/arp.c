@@ -199,7 +199,7 @@ int arp_resolve(u32 ip, u8 *mac, u32 timeout_ms) {
         if (arp_cache_lookup(ip, mac)) {
             return 0;
         }
-        sched_sleep_ms(10);
+        net_delay_ms(10);
     }
     return -1;
 }

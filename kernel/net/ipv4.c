@@ -2,6 +2,7 @@
 #include "arp.h"
 #include "eth.h"
 #include "icmp.h"
+#include "tcp.h"
 #include "lib.h"
 #include "net.h"
 #include "string.h"
@@ -134,6 +135,8 @@ void ipv4_receive(const u8 *frame, u32 length) {
         icmp_receive(payload, payload_length, view.source);
     } else if (view.protocol == IPV4_PROTOCOL_UDP) {
         udp_receive(payload, payload_length, view.source);
+    } else if (view.protocol == IPV4_PROTOCOL_TCP) {
+        tcp_receive(payload, payload_length, view.source);
     }
 }
 

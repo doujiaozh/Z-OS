@@ -14,12 +14,16 @@ struct net_config {
     u32 ip;
     u32 gateway;
     u32 netmask;
+    u32 dns;
+    u16 dns_port;
     u16 mtu;
 };
 
 void net_init(void);
 bool net_ready(void);
 void net_poll(void);
+bool net_in_poll(void);
+void net_delay_ms(u32 milliseconds);
 void net_receive_frame(const u8 *frame, u32 length);
 const struct net_config *net_config_get(void);
 u32 net_checksum(const void *data, u32 length);
