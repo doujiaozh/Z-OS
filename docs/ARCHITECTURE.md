@@ -691,6 +691,14 @@ directories on disk.
 
 `kernel/gui/mouse.c` extends the PS/2 driver:
 
+- The 8042 controller is initialized by flushing the output buffer, enabling
+  the auxiliary port with command 0xA8, reading the controller configuration
+  byte with 0x20, setting bit 1 to enable IRQ12 and clearing bit 5 to enable
+  the auxiliary clock, writing the byte back with 0x60, then sending device
+  commands through the 0xD4 prefix: `F6` set defaults and `F4` enable data
+  reporting, each waiting for a `FA` acknowledgement. Without the 0xD4 prefix
+  those bytes reach the controller instead of the mouse, which leaves the
+  device without data reporting and produces a pointer that never moves.
 - IRQ12 packets are decoded into relative delta, absolute clamped position and
   button state.
 - Every packet with motion and every button change pushes a `mouse_event` into
@@ -703,6 +711,13 @@ directories on disk.
   or when the console needs the cells. `console_putc_unlocked` restores the
   pointer before every character, so console output cannot be corrupted by the
   overlay. The timer tick refreshes the pointer at 100 Hz.
+- The graphical cursor is a 16 by 16 bitmap split into an outline mask and a
+  fill mask. The outline is drawn in black and the fill in white, giving a
+  classic arrow with a crisp edge on both dark and light backgrounds.
+- `mouse_render` saves the background pixels it covers and `mouse_restore`
+  writes them back, so the desktop loop erases the cursor before repainting
+  the scene and redraws it afterwards. That order is what prevents trails when
+  windows move or content changes underneath the pointer.
 - Graphics mode sets a flag that suppresses the text pointer while the
   framebuffer cursor is active.
 

@@ -7,9 +7,10 @@ threads, a preemptive user-process scheduler with per-process address spaces,
 a shared kernel high-half mapping, a kernel heap, a ramfs virtual filesystem,
 an ATA PIO block driver with a persistent Z-OS filesystem, ring-3 ELF64
 processes with POSIX-style primitives, a framebuffer graphics stack with bitmap
-fonts, PS/2 mouse events and a compositor, a modern desktop environment with
-status bar, taskbar, icons and draggable windows, an interactive shell, and
-automated boot-time self-tests.
+fonts, PS/2 mouse events with an outlined graphical cursor and ghost-free
+repaint, a compositor, a modern desktop environment with status bar, taskbar,
+icons and draggable windows, an interactive shell, and automated boot-time
+self-tests.
 
 This repository is an engineering foundation, not a replacement for Windows,
 Linux, or macOS. It does not claim feature parity with those systems. The
@@ -373,8 +374,8 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `rm`, `mv`, `cp`, `stat`, `hexdump`, `df`, `mem`, `free`, `uptime`, `date`,
 `ps`, `threads`, `sleep`, `history`, `rand`, `usertest`, `schedtest`,
 `forktest`, `postest`, `guitest2`, `gfx`, `diskinfo`, `format`, `zmount`,
-`zls`, `zsave`, `zcat`, `zrm`, `zsync`, `gui`, `exit`, `reboot`, and
-`shutdown`.
+`zls`, `zsave`, `zcat`, `zrm`, `zsync`, `mouse`, `gui`, `exit`, `reboot`,
+and `shutdown`.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and

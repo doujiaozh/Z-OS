@@ -714,6 +714,8 @@ def run_gui():
         session.wait_for("gui: desktop active", 20)
         monitor = MonitorSession(monitor_port)
         time.sleep(0.5)
+        monitor.command("mouse_move 0 0")
+        time.sleep(0.8)
         shot = BUILD / "gui-desktop.ppm"
         monitor.screendump(shot)
         ppm = read_ppm(shot)
@@ -731,6 +733,82 @@ def run_gui():
             raise CheckFailure("gui wallpaper pixel mismatch: " + str(wallpaper_pixel))
         if icon_pixel != (0x2F, 0x41, 0x52):
             raise CheckFailure("gui desktop icon pixel mismatch: " + str(icon_pixel))
+        def last_pointer_position():
+            matches = re.findall(r"gui: mouse move x=(-?\d+) y=(-?\d+)", session.snapshot().decode("utf-8", errors="replace"))
+            if not matches:
+                return None
+            return int(matches[-1][0]), int(matches[-1][1])
+
+        def clamp_delta(value):
+            if value > 120:
+                return 120
+            if value < -120:
+                return -120
+            return value
+
+        def move_pointer(target_x, target_y, attempts=16):
+            for attempt in range(attempts):
+                position = last_pointer_position()
+                if position is None:
+                    raise CheckFailure("mouse movement did not reach the desktop")
+                current_x, current_y = position
+                if abs(current_x - target_x) <= 2 and abs(current_y - target_y) <= 2:
+                    return current_x, current_y
+                start = len(session.snapshot())
+                monitor.command("mouse_move %d %d" % (clamp_delta(target_x - current_x),
+                                                      clamp_delta(target_y - current_y)), timeout=1)
+                deadline = time.time() + 6
+                while time.time() < deadline:
+                    new_position = last_pointer_position()
+                    if new_position is not None and new_position != position:
+                        break
+                    time.sleep(0.05)
+            position = last_pointer_position()
+            if position is None or abs(position[0] - target_x) > 4 or abs(position[1] - target_y) > 4:
+                raise CheckFailure("mouse pointer did not reach the requested target: " + str(position))
+            return position
+
+        def cursor_color_counts(ppm, x, y, size=16):
+            black = 0
+            white = 0
+            for row in range(size):
+                for column in range(size):
+                    pixel = ppm_pixel(ppm, x + column, y + row)
+                    if pixel == (0, 0, 0):
+                        black += 1
+                    elif pixel == (255, 255, 255):
+                        white += 1
+            return black, white
+
+        move_pointer(500, 300)
+        time.sleep(0.3)
+        pointer_shot = BUILD / "gui-pointer.ppm"
+        monitor.screendump(pointer_shot)
+        cursor_ppm = read_ppm(pointer_shot)
+        black, white = cursor_color_counts(cursor_ppm, 500, 300)
+        if black < 30 or white < 40:
+            raise CheckFailure("mouse cursor outline is not rendered: black=" +
+                               str(black) + " white=" + str(white))
+        move_pointer(640, 420)
+        time.sleep(0.3)
+        moved_shot = BUILD / "gui-pointer-moved.ppm"
+        monitor.screendump(moved_shot)
+        moved_ppm = read_ppm(moved_shot)
+        old_black, old_white = cursor_color_counts(moved_ppm, 500, 300)
+        new_black, new_white = cursor_color_counts(moved_ppm, 640, 420)
+        if old_black != 0 or old_white != 0:
+            raise CheckFailure("mouse cursor left a ghost at the previous position")
+        if new_black < 30 or new_white < 40:
+            raise CheckFailure("mouse cursor was not redrawn at the new position")
+        print("gui cursor outline and ghost-free repaint PASS")
+
+        hover_x, hover_y = move_pointer(60, 70)
+        if hover_x != 60 or hover_y != 70:
+            raise CheckFailure("mouse pointer tracking is inaccurate")
+        monitor.command("mouse_button 1", timeout=1)
+        time.sleep(0.2)
+        monitor.command("mouse_button 0", timeout=1)
+        session.wait_for("gui: opened Files", 15)
         monitor.sendkey("1")
         session.wait_for("gui: opened Files", 15)
         time.sleep(0.5)
@@ -740,6 +818,14 @@ def run_gui():
         title_pixels = ppm_count_color(window_ppm, (0x2F, 0x6F, 0xB5))
         if title_pixels < 500:
             raise CheckFailure("gui window title bar is not rendered")
+        move_pointer(250, 68)
+        monitor.command("mouse_button 1", timeout=1)
+        time.sleep(0.2)
+        monitor.command("mouse_move 40 30", timeout=1)
+        time.sleep(0.4)
+        monitor.command("mouse_button 0", timeout=1)
+        session.wait_for("gui: window dragged", 15)
+        print("gui mouse click and drag events PASS")
         session.send_line("exit")
         session.wait_for("gui: exited desktop", 20)
         session.wait_for("z-os:", 20)

@@ -833,13 +833,17 @@ static void test_mouse(void)
     u32 blank_checksum = gfx_checksum(&surface, 0, 0, 64, 64);
     mouse_move_to(20, 20);
     check(mouse_render(&surface) == 0 &&
-          gfx_count_color(&surface, 0, 0, 64, 64, 0x00FFFFFFU) > 0,
-          "mouse renders a cursor into a surface");
+          gfx_count_color(&surface, 0, 0, 64, 64, 0x00FFFFFFU) > 0 &&
+          gfx_count_color(&surface, 0, 0, 64, 64, 0x00000000U) > 0,
+          "mouse renders an outlined cursor into a surface");
     check(mouse_restore(&surface) == 0 &&
           gfx_count_color(&surface, 0, 0, 64, 64, 0x00FFFFFFU) == 0,
           "mouse restores the background under the cursor");
+    mouse_move_to(30, 30);
+    mouse_render(&surface);
+    mouse_restore(&surface);
     check(gfx_checksum(&surface, 0, 0, 64, 64) == blank_checksum,
-          "mouse cursor restore leaves the surface unchanged");
+          "mouse cursor restore leaves the surface unchanged after a move");
     mouse_move_to(319, 199);
     packet[0] = 0x28;
     packet[1] = 100;

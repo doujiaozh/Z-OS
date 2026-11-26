@@ -9,13 +9,31 @@
 #define PS2_COMMAND_PORT 0x64
 #define PS2_STATUS_OUTPUT 0x01
 #define PS2_STATUS_INPUT 0x02
-#define MOUSE_CURSOR_WIDTH 12
-#define MOUSE_CURSOR_HEIGHT 12
-#define MOUSE_CURSOR_HOTSPOT_X 1
-#define MOUSE_CURSOR_HOTSPOT_Y 1
+#define PS2_COMMAND_ENABLE_AUX 0xA8
+#define PS2_COMMAND_READ_CONFIG 0x20
+#define PS2_COMMAND_WRITE_CONFIG 0x60
+#define PS2_COMMAND_WRITE_AUX 0xD4
+#define PS2_ACK 0xFA
+#define PS2_DEVICE_SET_DEFAULTS 0xF6
+#define PS2_DEVICE_ENABLE_REPORTING 0xF4
+#define PS2_CONFIG_AUX_IRQ 0x02
+#define PS2_CONFIG_AUX_CLOCK 0x20
 
-static const u8 cursor_mask[MOUSE_CURSOR_HEIGHT] = {
-    0xC0, 0xF0, 0xFC, 0xFF, 0xFF, 0xFF, 0xFC, 0xF8, 0xD8, 0x88, 0x08, 0x00
+#define MOUSE_CURSOR_WIDTH 16
+#define MOUSE_CURSOR_HEIGHT 16
+#define MOUSE_CURSOR_HOTSPOT_X 0
+#define MOUSE_CURSOR_HOTSPOT_Y 0
+#define MOUSE_CURSOR_OUTLINE_COLOR 0x00000000U
+#define MOUSE_CURSOR_FILL_COLOR 0x00FFFFFFU
+
+static const u16 cursor_outline[MOUSE_CURSOR_HEIGHT] = {
+    0x8000, 0xC000, 0xA000, 0x9000, 0x8800, 0x8400, 0x8200, 0x8100,
+    0x8080, 0x8440, 0x8A20, 0x9110, 0xA088, 0xC048, 0x8028, 0x0010
+};
+
+static const u16 cursor_fill[MOUSE_CURSOR_HEIGHT] = {
+    0x0000, 0x0000, 0x4000, 0x6000, 0x7000, 0x7800, 0x7C00, 0x7E00,
+    0x7F00, 0x7B80, 0x71C0, 0x60E0, 0x4070, 0x0030, 0x0010, 0x0000
 };
 
 static struct mouse_state state;
@@ -68,6 +86,25 @@ static u8 ps2_read_data(void) {
     return inb(PS2_DATA_PORT);
 }
 
+static void ps2_flush_output(void) {
+    for (u32 spin = 0; spin < 64; spin++) {
+        if ((inb(PS2_STATUS_PORT) & PS2_STATUS_OUTPUT) == 0) {
+            return;
+        }
+        inb(PS2_DATA_PORT);
+    }
+}
+
+static bool ps2_write_aux(u8 value) {
+    ps2_write_command(PS2_COMMAND_WRITE_AUX);
+    ps2_write_data(value);
+    u8 response = ps2_read_data();
+    for (u32 spin = 0; spin < 8 && response != PS2_ACK; spin++) {
+        response = ps2_read_data();
+    }
+    return response == PS2_ACK;
+}
+
 void mouse_set_bounds(u32 width, u32 height) {
     screen_width = width == 0 ? MOUSE_DEFAULT_WIDTH : width;
     screen_height = height == 0 ? MOUSE_DEFAULT_HEIGHT : height;
@@ -85,21 +122,21 @@ void mouse_init(void) {
     state.y = (i32)(screen_height / 2);
     packet_index = 0;
     cursor_saved = false;
-    ps2_write_command(0xA8);
-    ps2_write_command(0x20);
+    ps2_flush_output();
+    ps2_write_command(PS2_COMMAND_ENABLE_AUX);
+    ps2_write_command(PS2_COMMAND_READ_CONFIG);
     u8 configuration = ps2_read_data();
-    configuration |= 0x02;
-    configuration &= (u8)~0x20;
-    ps2_write_command(0x60);
+    configuration |= PS2_CONFIG_AUX_IRQ;
+    configuration &= (u8)~PS2_CONFIG_AUX_CLOCK;
+    ps2_write_command(PS2_COMMAND_WRITE_CONFIG);
     ps2_write_data(configuration);
-    ps2_write_command(0xA8);
-    ps2_write_data(0xF6);
-    ps2_read_data();
-    ps2_write_data(0xF4);
-    u8 acknowledgement = ps2_read_data();
+    ps2_write_command(PS2_COMMAND_ENABLE_AUX);
+    bool defaults_ok = ps2_write_aux(PS2_DEVICE_SET_DEFAULTS);
+    bool reporting_ok = ps2_write_aux(PS2_DEVICE_ENABLE_REPORTING);
+    ps2_flush_output();
     pic_set_mask(PIC_IRQ_CASCADE, false);
     pic_set_mask(12, false);
-    state.present = acknowledgement == 0xFA;
+    state.present = defaults_ok && reporting_ok;
     state.initialized = true;
 }
 
@@ -234,8 +271,8 @@ void mouse_process_packet(const u8 *packet) {
         state.errors++;
         return;
     }
-    i32 delta_x = packet[1];
-    i32 delta_y = packet[2];
+    i32 delta_x = (i32)(u8)packet[1];
+    i32 delta_y = (i32)(u8)packet[2];
     if ((packet[0] & 0x10) != 0) {
         delta_x |= 0xFFFFFF00;
     }
@@ -326,11 +363,12 @@ int mouse_restore(struct gfx_surface *surface) {
     }
     for (u32 row = 0; row < MOUSE_CURSOR_HEIGHT; row++) {
         for (u32 column = 0; column < MOUSE_CURSOR_WIDTH; column++) {
-            if ((cursor_mask[row] & (0x80U >> column)) == 0) {
+            i32 x = saved_x + (i32)column;
+            i32 y = saved_y + (i32)row;
+            if (x < 0 || y < 0 || x >= (i32)surface->width || y >= (i32)surface->height) {
                 continue;
             }
-            gfx_plot(surface, saved_x + (i32)column, saved_y + (i32)row,
-                     saved_pixels[row * MOUSE_CURSOR_WIDTH + column]);
+            gfx_plot(surface, x, y, saved_pixels[row * MOUSE_CURSOR_WIDTH + column]);
         }
     }
     cursor_saved = false;
@@ -347,14 +385,22 @@ int mouse_render(struct gfx_surface *surface) {
     saved_x = origin_x;
     saved_y = origin_y;
     for (u32 row = 0; row < MOUSE_CURSOR_HEIGHT; row++) {
+        i32 y = origin_y + (i32)row;
+        if (y < 0 || y >= (i32)surface->height) {
+            continue;
+        }
         for (u32 column = 0; column < MOUSE_CURSOR_WIDTH; column++) {
-            if ((cursor_mask[row] & (0x80U >> column)) == 0) {
+            i32 x = origin_x + (i32)column;
+            if (x < 0 || x >= (i32)surface->width) {
                 continue;
             }
-            i32 x = origin_x + (i32)column;
-            i32 y = origin_y + (i32)row;
             saved_pixels[row * MOUSE_CURSOR_WIDTH + column] = gfx_get_pixel(surface, x, y);
-            gfx_plot(surface, x, y, 0x00FFFFFFU);
+            u16 bit = (u16)(0x8000U >> column);
+            if ((cursor_outline[row] & bit) != 0) {
+                gfx_plot(surface, x, y, MOUSE_CURSOR_OUTLINE_COLOR);
+            } else if ((cursor_fill[row] & bit) != 0) {
+                gfx_plot(surface, x, y, MOUSE_CURSOR_FILL_COLOR);
+            }
         }
     }
     cursor_saved = true;

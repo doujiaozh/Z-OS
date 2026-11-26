@@ -227,6 +227,7 @@ static void command_help(void) {
     kprintf("  zsync                write /disk contents back to zfs\n");
     kprintf("  gui                  enter the graphical desktop session\n");
     kprintf("  exit                 leave the graphical desktop session\n");
+    kprintf("  mouse                report ps2 mouse state and packet counters\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -749,6 +750,11 @@ static void gui_run_session(void) {
     while (!desktop_should_exit()) {
         struct mouse_event event;
         while (mouse_pop_event(&event)) {
+            if (event.type == MOUSE_EVENT_MOVE) {
+                kprintf("gui: mouse move x=%d y=%d dx=%d dy=%d\n",
+                        event.x, event.y, event.delta_x, event.delta_y);
+            }
+            mouse_restore(surface);
             desktop_handle_mouse(&event);
             desktop_render();
             mouse_render(surface);
@@ -757,6 +763,7 @@ static void gui_run_session(void) {
         int key = input_trygetchar();
         while (key >= 0) {
             desktop_handle_key((char)key);
+            mouse_restore(surface);
             desktop_render();
             mouse_render(surface);
             gui_print_action(previous);
@@ -769,6 +776,16 @@ static void gui_run_session(void) {
     fb_restore_text();
     console_clear();
     kprintf("gui: exited desktop\n");
+}
+
+static void command_mouse(void) {
+    struct mouse_state state;
+    mouse_get_state(&state);
+    kprintf("mouse present: %s, initialized: %s\n",
+            state.present ? "yes" : "no", state.initialized ? "yes" : "no");
+    kprintf("mouse position: %d, %d buttons: %u\n", (int)state.x, (int)state.y, state.buttons);
+    kprintf("mouse packets: %u errors: %u queued: %u\n",
+            state.packets, state.errors, mouse_event_count());
 }
 
 static void command_gui(void) {
@@ -976,18 +993,30 @@ static void command_gfx(int argc, char *arguments[]) {
             }
         }
     }
+    u32 cursor_black = 0;
+    u32 cursor_white = 0;
+    for (u32 y = 320; y < 336; y++) {
+        for (u32 x = 560; x < 576; x++) {
+            u32 pixel = fb_pixel(x, y);
+            if (pixel == 0x00000000U) {
+                cursor_black++;
+            } else if (pixel == 0x00FFFFFFU) {
+                cursor_white++;
+            }
+        }
+    }
     bool verified = fb_pixel(120, 140) == 0x00D9453DU &&
                     fb_pixel(460, 200) == 0x00F2C14EU &&
                     fb_pixel(620, 280) == 0x002AA6A6U &&
                     fb_pixel(100, 70) == 0x003C6E9EU &&
                     text_pixels > 20 &&
-                    fb_pixel(560, 320) == 0x00FFFFFFU;
+                    cursor_black > 20 && cursor_white > 20;
     kprintf("gfx: framebuffer %ux%ux%u at %p, surface %s\n",
             fb_current_mode().width, fb_current_mode().height,
             fb_current_mode().bits_per_pixel, (void *)fb_current_mode().physical,
             fb_current_mode().shadow ? "shadow" : "vram");
     kprintf("gfx: window manager composited %u windows\n", wm_count());
-    kprintf("gfx: font pixels %u, cursor rendered\n", text_pixels);
+    kprintf("gfx: font pixels %u, cursor outline pixels %u\n", text_pixels, cursor_black);
     kprintf("gfx: composition %s\n", verified ? "verified" : "failed");
     while (wm_count() > 0) {
         u32 id = wm_zorder_at(0);
@@ -1093,6 +1122,8 @@ static void execute_command(int argc, char *arguments[]) {
         command_zrm(argc, arguments);
     } else if (strcmp(command, "zsync") == 0) {
         command_zsync();
+    } else if (strcmp(command, "mouse") == 0) {
+        command_mouse();
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

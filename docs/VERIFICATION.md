@@ -302,9 +302,11 @@ rebuilds first unless `--skip-build` is supplied.
 - POSIX signals, credentials, sessions, or a file-descriptor table.
 - Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
-- Mouse hardware injection; the automated desktop assertions drive the same
-  event queue and hit-testing path that IRQ12 feeds, and the QEMU monitor mouse
-  commands were observed to be inert in headless mode on this host.
+- Mouse acceleration and wheel semantics; the automated GUI stage injects
+  relative motion through the QEMU monitor, which reaches the guest through the
+  same IRQ12 packet path as a physical mouse. QEMU sends one initial absolute
+  to relative synchronization burst, so the stage flushes it with a zero move
+  before measuring pointer positions.
 - Damage-driven redraw, a user-space compositor client, or window resize.
 - POSIX ABI conformance, libc, argv/envp, or dynamic linking.
 - The kernel executing from the high-half direct map. The high-half window is
