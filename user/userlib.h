@@ -55,6 +55,7 @@ struct mouse_user_state {
 #define ZO_SYS_RECV 34
 #define ZO_SYS_SEND 35
 #define ZO_SYS_DNS 36
+#define ZO_SYS_GET_TEST_PORT 37
 
 static inline long zsys3(long number, long first, long second, long third) {
     __asm__ volatile("int $0x80"
@@ -233,6 +234,11 @@ static inline long zsend_tcp(long descriptor, const void *data, long length)
 static inline long zdns(const char *name, unsigned long *address)
 {
     return zsys3(ZO_SYS_DNS, (long)name, (long)address, 0);
+}
+
+static inline long zgettestport(void)
+{
+    return zsys3(ZO_SYS_GET_TEST_PORT, 0, 0, 0);
 }
 
 static inline long zmemeq(const void *first, const void *second, unsigned long length)

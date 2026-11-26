@@ -58,6 +58,7 @@
 #define SYS_RECV 34
 #define SYS_SEND 35
 #define SYS_DNS 36
+#define SYS_GET_TEST_PORT 37
 
 static bool gui_enter_flag = false;
 static bool gui_exit_flag = false;
@@ -83,6 +84,16 @@ bool gui_exit_requested(void) {
 void gui_clear_requests(void) {
     gui_enter_flag = false;
     gui_exit_flag = false;
+}
+
+static u32 test_tcp_port = 34567;
+
+void syscall_set_test_port(u32 port) {
+    test_tcp_port = port == 0 ? 34567 : port;
+}
+
+u32 syscall_get_test_port(void) {
+    return test_tcp_port;
 }
 
 #define SYSCALL_INT_INSTRUCTION_SIZE 2
@@ -654,6 +665,9 @@ void syscall_dispatch(struct registers *registers) {
             break;
         case SYS_DNS:
             registers->rax = syscall_dns(registers);
+            break;
+        case SYS_GET_TEST_PORT:
+            registers->rax = (u64)test_tcp_port;
             break;
         default:
             registers->rax = (u64)-1;

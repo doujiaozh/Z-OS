@@ -248,7 +248,7 @@ static void command_help(void) {
     kprintf("  dnsport <port>       set the dns server port\n");
     kprintf("  tcptest <ip> <port> [http]  open a tcp connection and exchange data\n");
     kprintf("  tcplisten <port>     listen for one tcp connection and echo it\n");
-    kprintf("  nettest2             run the ring 3 tcp client test program\n");
+    kprintf("  nettest2 [port]      run the ring 3 tcp client test program\n");
     kprintf("  dhcp                 request a dynamic address from a dhcp server\n");
     kprintf("  http get <url>       fetch a web page with an http 1.0 get request\n");
     kprintf("  dnscache             report the dns cache contents and counters\n");
@@ -1149,7 +1149,13 @@ static void command_tcplisten(int argc, char *arguments[]) {
     socket_close(listener);
 }
 
-static void command_nettest2(void) {
+static void command_nettest2(int argc, char *arguments[]) {
+    if (argc >= 2) {
+        u32 port = parse_decimal(arguments[1], 0);
+        if (port > 0 && port < 65534) {
+            syscall_set_test_port(port);
+        }
+    }
     u64 status = 0xFFFFFFFFFFFFFFFFULL;
     u64 pid = run_single_program("nettest2", user_nettest2_start, user_nettest2_end, &status);
     if (pid == 0) {
@@ -1603,7 +1609,7 @@ static void execute_command(int argc, char *arguments[]) {
     } else if (strcmp(command, "tcplisten") == 0) {
         command_tcplisten(argc, arguments);
     } else if (strcmp(command, "nettest2") == 0) {
-        command_nettest2();
+        command_nettest2(argc, arguments);
     } else if (strcmp(command, "dhcp") == 0) {
         command_dhcp();
     } else if (strcmp(command, "http") == 0) {

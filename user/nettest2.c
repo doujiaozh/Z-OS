@@ -11,13 +11,15 @@
 
 __attribute__((noreturn)) void _start(void) {
     zmark(USER_MARK_START);
+    long configured_port = zgettestport();
+    unsigned long remote_port = configured_port > 0 ? (unsigned long)configured_port : USER_TCP_PORT;
     long descriptor = zsocket_stream();
     if (descriptor <= 0) {
         zmark(USER_MARK_FAILURE);
         zwrite("nettest2: socket failed\n");
         zexit(1);
     }
-    if (zconnect(descriptor, USER_TCP_REMOTE, USER_TCP_PORT) != 0) {
+    if (zconnect(descriptor, USER_TCP_REMOTE, remote_port) != 0) {
         zmark(USER_MARK_FAILURE);
         zwrite("nettest2: connect failed\n");
         zsocket_close(descriptor);
@@ -54,11 +56,11 @@ __attribute__((noreturn)) void _start(void) {
     zsocket_close(descriptor);
     long leak_listener = zsocket_stream();
     if (leak_listener > 0) {
-        zbind(leak_listener, 34568);
+        zbind(leak_listener, remote_port + 1);
     }
     long leak_datagram = zsocket();
     if (leak_datagram > 0) {
-        zbind(leak_datagram, 34569);
+        zbind(leak_datagram, remote_port + 2);
     }
     zmark(USER_MARK_LEAK);
     zwrite("nettest2: leaving sockets open for cleanup\n");

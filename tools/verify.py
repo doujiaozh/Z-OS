@@ -991,7 +991,7 @@ def run_tcp():
     echo_port = free_port()
     http_port = free_port()
     dns_port = free_port()
-    user_port = 34567
+    user_port = free_port()
     echo_payloads = []
     user_payloads = []
     dns_queries = []
@@ -1139,8 +1139,8 @@ def run_tcp():
         if not http_payloads or b"GET / HTTP/1.0" not in http_payloads[0]:
             raise CheckFailure("http server did not receive the request line")
         start = len(session.snapshot())
-        session.send_line("nettest2")
-        prompt = session.wait_for("z-os:", 90, start + 10)
+        session.send_line("nettest2 " + str(user_port))
+        prompt = session.wait_for("z-os:", 90, start + 20)
         segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
         if "nettest2: tcp echo verified" not in segment or "nettest2: exit status 0" not in segment:
             raise CheckFailure("ring 3 tcp program failed\n" + segment)
@@ -1175,7 +1175,7 @@ def run_internet():
     port = free_port()
     dns_port = free_port()
     http_port = free_port()
-    user_port = 34567
+    user_port = free_port()
     echo_payloads = []
     user_payloads = []
     http_requests = []
@@ -1315,14 +1315,16 @@ def run_internet():
         if not http_requests or b"GET /index.html HTTP/1.0" not in http_requests[0]:
             raise CheckFailure("http server did not receive the request line")
         run_command("sockinfo", ["sockets: 0"])
-        run_command("nettest2", ["nettest2: tcp echo verified", "nettest2: exit status 0",
-                                 "leaving sockets open for cleanup"], timeout=90)
+        run_command("nettest2 " + str(user_port),
+                    ["nettest2: tcp echo verified", "nettest2: exit status 0",
+                     "leaving sockets open for cleanup"], timeout=90)
         if not user_payloads:
             raise CheckFailure("tcp user program payload was not received by the host")
         cleanup_output = run_command("sockinfo", ["sockets: 0", "tcp connections: 0"])
         if "udp sockets: 0" not in cleanup_output:
             raise CheckFailure("udp sockets were not reclaimed after process exit\n" + cleanup_output)
-        run_command("tcplisten 34568 200", ["tcp: listening on port 34568"], timeout=30)
+        run_command("tcplisten " + str(user_port + 1) + " 200",
+                    ["tcp: listening on port " + str(user_port + 1)], timeout=30)
         print("dhcp lease, dns cache, http get and socket cleanup PASS")
         session.send_line("shutdown")
         try:
