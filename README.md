@@ -6,8 +6,8 @@ provides a small but real protected-mode environment: preemptive kernel
 threads, a preemptive user-process scheduler with per-process address spaces,
 a shared kernel high-half mapping, a kernel heap, a ramfs virtual filesystem,
 an ATA PIO block driver with a persistent Z-OS filesystem, a PCI e1000 network
-driver with ARP, IPv4, ICMP, UDP and TCP plus socket system calls and a DNS
-client, ring-3 ELF64
+driver with ARP, IPv4, ICMP, UDP, TCP, DHCP, cached DNS, a minimal HTTP client
+and socket system calls with process ownership, ring-3 ELF64
 processes with POSIX-style primitives, a framebuffer graphics stack with bitmap
 fonts, PS/2 mouse events with an outlined graphical cursor and ghost-free
 repaint, a compositor, a modern desktop environment with status bar, taskbar,
@@ -21,7 +21,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 0.8.0, codename Transport. Development quality. Not production ready.
+Version 0.9.0, codename Internet. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -31,13 +31,13 @@ Version 0.8.0, codename Transport. Development quality. Not production ready.
 | Memory | E820 frame bitmap, 4-level paging, per-process PML4, shared high-half direct map |
 | Processes | PID table, ready queue, isolated address spaces, descriptor tables |
 | Storage | ATA PIO block device, persistent ZFS image, /disk VFS mount |
-| Network | PCI e1000 driver, ARP, IPv4, ICMP, UDP, TCP, DNS, socket syscalls |
+| Network | PCI e1000 driver, ARP, IPv4, ICMP, UDP, TCP, DHCP, cached DNS, HTTP GET, socket syscalls |
 | Scheduling | Preemptive kernel threads, time-sliced user processes, timed wait queues |
 | Filesystem | In-memory VFS and ramfs, 128 nodes, 1 MiB maximum file size |
 | User mode | Ring-3 static ELF64 C process, TSS kernel stack, `int 0x80` syscalls |
 | Graphics | PCI VGA, gfx surfaces, fonts, mouse events, compositor, desktop shell |
 | Shell | Directory and file commands, system information, ELF process launcher |
-| Verification | 322 in-kernel tests, boot smoke, storage replay, network, tcp, desktop tests |
+| Verification | 354 in-kernel tests, boot smoke, storage replay, network, tcp, internet, desktop tests |
 
 Implemented and verified:
 
@@ -176,7 +176,7 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 322 in-kernel checks covering physical memory,
+The self-test image runs 354 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
 ELF64 validation, per-process address spaces, high-half mapping, process
 lifecycle, preemptive time slicing, fork continuation, blocking wait,
@@ -198,7 +198,11 @@ then forwards a UDP datagram from the host through a host forward and asserts
 the guest echoes the payload back. The tcp stage boots with the same network,
 resolves a domain against a controlled DNS responder, opens a TCP connection to
 a host echo service, performs an HTTP request and response over TCP, and runs
-the ring 3 TCP client program against a host echo service. The GUI stage enters the desktop, decodes a framebuffer screendump
+the ring 3 TCP client program against a host echo service. The internet stage
+requests a DHCP lease from the QEMU user mode DHCP server, proves the DNS cache
+suppresses a repeated query, fetches a page body from a host HTTP server, and
+verifies that sockets left open by a ring 3 process are reclaimed and their
+ports are immediately reusable. The GUI stage enters the desktop, decodes a framebuffer screendump
 to assert status bar, taskbar, wallpaper and icon pixels, opens a window
 through the keyboard, checks the rendered title bar, types exit over the serial
 console, and then verifies the shell is back in VGA text mode. The keyboard
@@ -385,7 +389,8 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `forktest`, `postest`, `guitest2`, `gfx`, `diskinfo`, `format`, `zmount`,
 `zls`, `zsave`, `zcat`, `zrm`, `zsync`, `mouse`, `netinfo`, `arp`, `ping`,
 `udp-echo`, `dnsserver`, `dnsport`, `dns`, `tcptest`, `tcplisten`, `nettest2`,
-`gui`, `exit`, `reboot`, and `shutdown`.
+`dhcp`, `http`, `dnscache`, `sockinfo`, `gui`, `exit`, `reboot`, and
+`shutdown`.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and
@@ -408,7 +413,7 @@ kernel/        freestanding C and NASM kernel
   cpu/         GDT, IDT, PIC, ELF64 loader, power
   drivers/     console, serial, keyboard, input queue, PIT, RTC, display registry, ATA PIO, PCI, e1000
   fs/          VFS, ramfs, file descriptor tables, ZFS persistent filesystem
-  net/         ethernet, ARP, IPv4, ICMP, UDP, TCP, DNS, socket layer
+  net/         ethernet, ARP, IPv4, ICMP, UDP, TCP, DHCP, DNS, HTTP, socket layer
   include/     shared kernel interfaces and ELF definitions
   lib/         string and formatted output
   mm/          physical memory, paging, address spaces, heap

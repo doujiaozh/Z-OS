@@ -3,7 +3,9 @@
 #include "console.h"
 #include "arp.h"
 #include "desktop.h"
+#include "dhcp.h"
 #include "dns.h"
+#include "http.h"
 #include "e1000.h"
 #include "icmp.h"
 #include "ipv4.h"
@@ -247,6 +249,10 @@ static void command_help(void) {
     kprintf("  tcptest <ip> <port> [http]  open a tcp connection and exchange data\n");
     kprintf("  tcplisten <port>     listen for one tcp connection and echo it\n");
     kprintf("  nettest2             run the ring 3 tcp client test program\n");
+    kprintf("  dhcp                 request a dynamic address from a dhcp server\n");
+    kprintf("  http get <url>       fetch a web page with an http 1.0 get request\n");
+    kprintf("  dnscache             report the dns cache contents and counters\n");
+    kprintf("  sockinfo             report socket and transport table usage\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -1153,6 +1159,85 @@ static void command_nettest2(void) {
     kprintf("nettest2: exit status %llu\n", status);
 }
 
+static void command_dhcp(void) {
+    if (!net_ready()) {
+        kprintf("dhcp: network is not ready\n");
+        return;
+    }
+    kprintf("dhcp: sending discover\n");
+    if (dhcp_discover(3000) != 0) {
+        kprintf("dhcp: no lease received\n");
+        return;
+    }
+    const struct dhcp_lease *lease = dhcp_current_lease();
+    char ip_text[20];
+    char mask_text[20];
+    char gateway_text[20];
+    char dns_text[20];
+    char server_text[20];
+    net_format_ip(lease->address, ip_text, sizeof(ip_text));
+    net_format_ip(lease->netmask, mask_text, sizeof(mask_text));
+    net_format_ip(lease->gateway, gateway_text, sizeof(gateway_text));
+    net_format_ip(lease->dns, dns_text, sizeof(dns_text));
+    net_format_ip(lease->server, server_text, sizeof(server_text));
+    kprintf("dhcp: ip %s netmask %s\n", ip_text, mask_text);
+    kprintf("dhcp: gateway %s dns %s\n", gateway_text, dns_text);
+    kprintf("dhcp: server %s lease %u seconds\n", server_text, lease->lease_seconds);
+}
+
+static void command_http(int argc, char *arguments[]) {
+    if (argc < 3 || strcmp(arguments[1], "get") != 0) {
+        kprintf("usage: http get <url>\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("http: network is not ready\n");
+        return;
+    }
+    static char body[2048];
+    int length = http_get_url(arguments[2], body, sizeof(body), 4000);
+    if (length < 0) {
+        kprintf("http: get %s failed\n", arguments[2]);
+        return;
+    }
+    kprintf("http: get %s returned %d bytes\n", arguments[2], length);
+    for (int index = 0; index < length && index < 160; index++) {
+        char character = body[index];
+        kprintf("%c", character >= 32 && character <= 126 ? character : '.');
+    }
+    kprintf("\n");
+}
+
+static void command_dnscache(void) {
+    kprintf("dns cache entries: %u negative: %u\n",
+            dns_cache_count(), dns_cache_negative_count());
+    kprintf("dns cache hits: %u misses: %u queries: %u\n",
+            dns_cache_hits(), dns_cache_misses(), dns_queries_sent());
+    for (u32 index = 0; index < 8; index++) {
+        char name[64];
+        u32 address = 0;
+        bool negative = false;
+        if (!dns_cache_entry(index, name, sizeof(name), &address, &negative)) {
+            continue;
+        }
+        if (negative) {
+            kprintf("dns cache: %s negative\n", name);
+        } else {
+            char ip_text[20];
+            net_format_ip(address, ip_text, sizeof(ip_text));
+            kprintf("dns cache: %s %s\n", name, ip_text);
+        }
+    }
+}
+
+static void command_sockinfo(void) {
+    kprintf("sockets: %u\n", socket_count());
+    kprintf("udp sockets: %u\n", udp_socket_count());
+    kprintf("tcp connections: %u\n", tcp_connection_count());
+    kprintf("http requests: %u completed: %u failures: %u\n",
+            http_requests_sent(), http_requests_completed(), http_failures());
+}
+
 static void command_mouse(void) {
     struct mouse_state state;
     mouse_get_state(&state);
@@ -1519,6 +1604,14 @@ static void execute_command(int argc, char *arguments[]) {
         command_tcplisten(argc, arguments);
     } else if (strcmp(command, "nettest2") == 0) {
         command_nettest2();
+    } else if (strcmp(command, "dhcp") == 0) {
+        command_dhcp();
+    } else if (strcmp(command, "http") == 0) {
+        command_http(argc, arguments);
+    } else if (strcmp(command, "dnscache") == 0) {
+        command_dnscache();
+    } else if (strcmp(command, "sockinfo") == 0) {
+        command_sockinfo();
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

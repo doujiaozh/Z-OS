@@ -3,10 +3,12 @@
 #include "net.h"
 #include "string.h"
 #include "tcp.h"
+#include "process.h"
 #include "udp.h"
 
 struct socket_record {
     bool used;
+    u32 owner;
     u32 domain;
     u32 type;
     int udp_index;
@@ -33,7 +35,7 @@ bool socket_valid(int descriptor) {
     return table[descriptor - 1].used;
 }
 
-int socket_create(u32 domain, u32 type, u32 protocol) {
+int socket_create_for_owner(u32 owner, u32 domain, u32 type, u32 protocol) {
     if (domain != SOCKET_AF_INET || (type != SOCKET_SOCK_DGRAM && type != SOCKET_SOCK_STREAM)) {
         return -1;
     }
@@ -42,6 +44,7 @@ int socket_create(u32 domain, u32 type, u32 protocol) {
         if (!table[index].used) {
             memset(&table[index], 0, sizeof(struct socket_record));
             table[index].used = true;
+            table[index].owner = owner;
             table[index].domain = domain;
             table[index].type = type;
             table[index].udp_index = -1;
@@ -50,6 +53,52 @@ int socket_create(u32 domain, u32 type, u32 protocol) {
         }
     }
     return -1;
+}
+
+int socket_create(u32 domain, u32 type, u32 protocol) {
+    u32 owner = 0;
+    struct process *current = process_current();
+    if (current != NULL) {
+        owner = current->pid;
+    }
+    return socket_create_for_owner(owner, domain, type, protocol);
+}
+
+u32 socket_owner(int descriptor) {
+    if (!socket_valid(descriptor)) {
+        return 0;
+    }
+    return table[descriptor - 1].owner;
+}
+
+u32 socket_owner_count(u32 owner) {
+    u32 count = 0;
+    for (u32 index = 0; index < SOCKET_MAX; index++) {
+        if (table[index].used && table[index].owner == owner) {
+            count++;
+        }
+    }
+    return count;
+}
+
+void socket_cleanup_process(u32 owner) {
+    for (u32 index = 0; index < SOCKET_MAX; index++) {
+        if (!table[index].used || table[index].owner != owner) {
+            continue;
+        }
+        if (table[index].udp_index >= 0) {
+            u16 port = udp_socket_port((u32)table[index].udp_index);
+            if (port != 0) {
+                udp_unbind(port);
+            }
+        }
+        if (table[index].tcp_index >= 0) {
+            tcp_close(table[index].tcp_index);
+        }
+        memset(&table[index], 0, sizeof(struct socket_record));
+        table[index].udp_index = -1;
+        table[index].tcp_index = -1;
+    }
 }
 
 int socket_bind(int descriptor, u32 address, u16 port) {

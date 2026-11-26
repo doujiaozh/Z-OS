@@ -2,12 +2,161 @@
 #include "lib.h"
 #include "net.h"
 #include "string.h"
+#include "timer.h"
 #include "udp.h"
 
+#define DNS_CACHE_SIZE 8
+#define DNS_CACHE_NAME 64
+#define DNS_NEGATIVE_TTL 5
+#define DNS_DEFAULT_TTL 60
+
+struct dns_cache_entry {
+    char name[DNS_CACHE_NAME];
+    u32 address;
+    u64 expiry;
+    u32 ttl;
+    bool negative;
+    bool valid;
+};
+
+static struct dns_cache_entry cache[DNS_CACHE_SIZE];
 static u16 query_identifier = 0x2000;
 static u32 queries_sent = 0;
 static u32 responses_received = 0;
 static u32 failures = 0;
+static u32 cache_hits = 0;
+static u32 cache_misses = 0;
+
+void dns_cache_clear(void) {
+    memset(cache, 0, sizeof(cache));
+}
+
+u32 dns_cache_count(void) {
+    u32 count = 0;
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        if (cache[index].valid) {
+            count++;
+        }
+    }
+    return count;
+}
+
+u32 dns_cache_negative_count(void) {
+    u32 count = 0;
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        if (cache[index].valid && cache[index].negative) {
+            count++;
+        }
+    }
+    return count;
+}
+
+u32 dns_cache_hits(void) {
+    return cache_hits;
+}
+
+u32 dns_cache_misses(void) {
+    return cache_misses;
+}
+
+static void cache_store(const char *name, u32 address, u32 ttl, bool negative) {
+    if (name == NULL || strlen(name) >= DNS_CACHE_NAME) {
+        return;
+    }
+    u64 now = timer_uptime_ms();
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        if (cache[index].valid && strcmp(cache[index].name, name) == 0) {
+            cache[index].address = address;
+            cache[index].ttl = ttl;
+            cache[index].negative = negative;
+            cache[index].expiry = now + (u64)ttl * 1000;
+            return;
+        }
+    }
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        if (!cache[index].valid) {
+            strncpy(cache[index].name, name, DNS_CACHE_NAME - 1);
+            cache[index].name[DNS_CACHE_NAME - 1] = 0;
+            cache[index].address = address;
+            cache[index].ttl = ttl;
+            cache[index].negative = negative;
+            cache[index].expiry = now + (u64)ttl * 1000;
+            cache[index].valid = true;
+            return;
+        }
+    }
+    u32 oldest = 0;
+    for (u32 index = 1; index < DNS_CACHE_SIZE; index++) {
+        if (cache[index].expiry < cache[oldest].expiry) {
+            oldest = index;
+        }
+    }
+    strncpy(cache[oldest].name, name, DNS_CACHE_NAME - 1);
+    cache[oldest].name[DNS_CACHE_NAME - 1] = 0;
+    cache[oldest].address = address;
+    cache[oldest].ttl = ttl;
+    cache[oldest].negative = negative;
+    cache[oldest].expiry = now + (u64)ttl * 1000;
+    cache[oldest].valid = true;
+}
+
+bool dns_cache_insert(const char *name, u32 address, u32 ttl, bool negative) {
+    if (name == NULL || ttl == 0) {
+        return false;
+    }
+    cache_store(name, address, ttl, negative);
+    return true;
+}
+
+bool dns_cache_lookup(const char *name, u32 *address, bool *negative) {
+    if (name == NULL) {
+        return false;
+    }
+    u64 now = timer_uptime_ms();
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        if (!cache[index].valid) {
+            continue;
+        }
+        if (strcmp(cache[index].name, name) != 0) {
+            continue;
+        }
+        if (cache[index].expiry <= now) {
+            cache[index].valid = false;
+            return false;
+        }
+        if (negative != NULL) {
+            *negative = cache[index].negative;
+        }
+        if (address != NULL && !cache[index].negative) {
+            *address = cache[index].address;
+        }
+        return true;
+    }
+    return false;
+}
+
+void dns_cache_expire_all(void) {
+    for (u32 index = 0; index < DNS_CACHE_SIZE; index++) {
+        cache[index].valid = false;
+    }
+}
+
+bool dns_cache_entry(u32 index, char *name, u32 name_capacity, u32 *address, bool *negative) {
+    if (index >= DNS_CACHE_SIZE || !cache[index].valid) {
+        return false;
+    }
+    if (name != NULL && name_capacity > 0) {
+        strncpy(name, cache[index].name, name_capacity - 1);
+        name[name_capacity - 1] = 0;
+    }
+    if (address != NULL) {
+        *address = cache[index].address;
+    }
+    if (negative != NULL) {
+        *negative = cache[index].negative;
+    }
+    return true;
+}
 
 static void write_be16(u8 *data, u16 value) {
     data[0] = (u8)(value >> 8);
@@ -74,7 +223,8 @@ static u32 skip_name(const u8 *message, u32 length, u32 position) {
     return length;
 }
 
-bool dns_parse_response(const u8 *message, u32 length, u16 identifier, u32 *address) {
+bool dns_parse_response_full(const u8 *message, u32 length, u16 identifier, u32 *address,
+                             u32 *ttl) {
     if (message == NULL || length < 12) {
         return false;
     }
@@ -105,6 +255,8 @@ bool dns_parse_response(const u8 *message, u32 length, u16 identifier, u32 *addr
         }
         u16 type = read_be16(message + position);
         u16 class_code = read_be16(message + position + 2);
+        u32 record_ttl = ((u32)message[position + 4] << 24) | ((u32)message[position + 5] << 16) |
+                         ((u32)message[position + 6] << 8) | message[position + 7];
         u16 data_length = read_be16(message + position + 8);
         position += 10;
         if (position + data_length > length) {
@@ -116,6 +268,9 @@ bool dns_parse_response(const u8 *message, u32 length, u16 identifier, u32 *addr
             if (address != NULL) {
                 *address = result;
             }
+            if (ttl != NULL) {
+                *ttl = record_ttl;
+            }
             return true;
         }
         position += data_length;
@@ -123,10 +278,27 @@ bool dns_parse_response(const u8 *message, u32 length, u16 identifier, u32 *addr
     return false;
 }
 
+bool dns_parse_response(const u8 *message, u32 length, u16 identifier, u32 *address) {
+    return dns_parse_response_full(message, length, identifier, address, NULL);
+}
+
 int dns_resolve(const char *name, u32 *address, u32 timeout_ms) {
-    if (!net_ready() || name == NULL || address == NULL) {
+    if (!net_ready() || name == NULL) {
         return -1;
     }
+    bool negative = false;
+    u32 cached = 0;
+    if (dns_cache_lookup(name, &cached, &negative)) {
+        cache_hits++;
+        if (negative) {
+            return -1;
+        }
+        if (address != NULL) {
+            *address = cached;
+        }
+        return 0;
+    }
+    cache_misses++;
     query_identifier++;
     u8 query[DNS_MAX_MESSAGE];
     u32 query_length = dns_build_query(name, query, sizeof(query));
@@ -163,12 +335,20 @@ int dns_resolve(const char *name, u32 *address, u32 timeout_ms) {
     udp_unbind(udp_socket_port((u32)udp_index));
     if (received <= 0) {
         failures++;
+        dns_cache_insert(name, 0, DNS_NEGATIVE_TTL, true);
         return -1;
     }
     responses_received++;
-    if (!dns_parse_response(response, (u32)received, identifier, address)) {
+    u32 resolved = 0;
+    u32 record_ttl = 0;
+    if (!dns_parse_response_full(response, (u32)received, identifier, &resolved, &record_ttl)) {
         failures++;
+        dns_cache_insert(name, 0, DNS_NEGATIVE_TTL, true);
         return -1;
+    }
+    dns_cache_insert(name, resolved, record_ttl == 0 ? DNS_DEFAULT_TTL : record_ttl, false);
+    if (address != NULL) {
+        *address = resolved;
     }
     return 0;
 }

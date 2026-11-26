@@ -6,6 +6,7 @@
 #define USER_MARK_CONNECTED 0x51
 #define USER_MARK_SENT 0x52
 #define USER_MARK_ECHO 0x53
+#define USER_MARK_LEAK 0x54
 #define USER_MARK_FAILURE 0x5F
 
 __attribute__((noreturn)) void _start(void) {
@@ -51,6 +52,16 @@ __attribute__((noreturn)) void _start(void) {
     zmark(USER_MARK_ECHO);
     zwrite("nettest2: tcp echo verified\n");
     zsocket_close(descriptor);
+    long leak_listener = zsocket_stream();
+    if (leak_listener > 0) {
+        zbind(leak_listener, 34568);
+    }
+    long leak_datagram = zsocket();
+    if (leak_datagram > 0) {
+        zbind(leak_datagram, 34569);
+    }
+    zmark(USER_MARK_LEAK);
+    zwrite("nettest2: leaving sockets open for cleanup\n");
     zexit(0);
     for (;;) {
     }

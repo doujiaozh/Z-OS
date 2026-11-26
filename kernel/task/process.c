@@ -9,6 +9,7 @@
 #include "string.h"
 #include "timer.h"
 #include "vmm.h"
+#include "socket.h"
 #include "waitq.h"
 
 static struct process process_table[MAX_PROCESSES];
@@ -307,6 +308,7 @@ void process_mark_zombie(struct process *process, u64 status) {
     if (process == NULL || process->state == PROCESS_ZOMBIE) {
         return;
     }
+    socket_cleanup_process(process->pid);
     if (process->state == PROCESS_READY) {
         process_dequeue_ready(process);
     }

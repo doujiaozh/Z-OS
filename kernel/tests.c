@@ -6,6 +6,7 @@
 #include "cred.h"
 #include "dns.h"
 #include "desktop.h"
+#include "dhcp.h"
 #include "e1000.h"
 #include "eth.h"
 #include "icmp.h"
@@ -15,6 +16,7 @@
 #include "fd.h"
 #include "font.h"
 #include "heap.h"
+#include "http.h"
 #include "input.h"
 #include "interrupts.h"
 #include "io.h"
@@ -1559,6 +1561,190 @@ static void test_tcp(void)
     check(!dns_parse_response(response, response_length, 0x2001, &resolved),
           "dns rejects responses with mismatched identifiers");
 }
+static void test_internet(void)
+{
+    struct net_config saved_config = *net_config_get();
+    u8 message[DHCP_MAX_MESSAGE];
+    memset(message, 0, sizeof(message));
+    u32 length = dhcp_build_discover(message, sizeof(message), 0x12345678U);
+    check(length > 240 && message[0] == 1 && message[1] == 1 && message[2] == 6,
+          "dhcp discover builds a client message header");
+    check(message[236] == 0x63 && message[237] == 0x82 && message[238] == 0x53 &&
+          message[239] == 0x63, "dhcp discover carries the magic cookie");
+    bool discover_type = false;
+    for (u32 index = 240; index + 2 < length; index++) {
+        if (message[index] == DHCP_OPTION_MESSAGE_TYPE && message[index + 1] == 1 &&
+            message[index + 2] == DHCP_MESSAGE_DISCOVER) {
+            discover_type = true;
+        }
+    }
+    check(discover_type, "dhcp discover requests an offer");
+    memset(message, 0, sizeof(message));
+    length = dhcp_build_request(message, sizeof(message), 0x12345678U, NET_IPV4(10, 0, 2, 20),
+                                NET_IPV4(10, 0, 2, 2));
+    bool requested_option = false;
+    bool server_option = false;
+    bool request_type = false;
+    for (u32 index = 240; index + 2 < length; index++) {
+        if (message[index] == DHCP_OPTION_REQUESTED_IP && message[index + 1] == 4) {
+            requested_option = true;
+        }
+        if (message[index] == DHCP_OPTION_SERVER_ID && message[index + 1] == 4) {
+            server_option = true;
+        }
+        if (message[index] == DHCP_OPTION_MESSAGE_TYPE && message[index + 1] == 1 &&
+            message[index + 2] == DHCP_MESSAGE_REQUEST) {
+            request_type = true;
+        }
+    }
+    check(requested_option && server_option && request_type,
+          "dhcp request carries the requested address and server");
+    u8 offer[DHCP_HEADER_SIZE + 64];
+    memset(offer, 0, sizeof(offer));
+    offer[0] = 2;
+    offer[1] = 1;
+    offer[2] = 6;
+    offer[4] = 0x12;
+    offer[5] = 0x34;
+    offer[6] = 0x56;
+    offer[7] = 0x78;
+    offer[16] = 10;
+    offer[17] = 0;
+    offer[18] = 2;
+    offer[19] = 20;
+    offer[236] = 0x63;
+    offer[237] = 0x82;
+    offer[238] = 0x53;
+    offer[239] = 0x63;
+    u32 position = DHCP_HEADER_SIZE;
+    offer[position++] = DHCP_OPTION_MESSAGE_TYPE;
+    offer[position++] = 1;
+    offer[position++] = DHCP_MESSAGE_OFFER;
+    offer[position++] = DHCP_OPTION_SUBNET_MASK;
+    offer[position++] = 4;
+    offer[position++] = 255;
+    offer[position++] = 255;
+    offer[position++] = 255;
+    offer[position++] = 0;
+    offer[position++] = DHCP_OPTION_ROUTER;
+    offer[position++] = 4;
+    offer[position++] = 10;
+    offer[position++] = 0;
+    offer[position++] = 2;
+    offer[position++] = 2;
+    offer[position++] = DHCP_OPTION_DNS;
+    offer[position++] = 4;
+    offer[position++] = 10;
+    offer[position++] = 0;
+    offer[position++] = 2;
+    offer[position++] = 3;
+    offer[position++] = DHCP_OPTION_SERVER_ID;
+    offer[position++] = 4;
+    offer[position++] = 10;
+    offer[position++] = 0;
+    offer[position++] = 2;
+    offer[position++] = 2;
+    offer[position++] = DHCP_OPTION_LEASE_TIME;
+    offer[position++] = 4;
+    offer[position++] = 0;
+    offer[position++] = 0;
+    offer[position++] = 0x0E;
+    offer[position++] = 0x10;
+    offer[position++] = DHCP_OPTION_END;
+    struct dhcp_lease lease;
+    u8 message_type = 0;
+    check(dhcp_parse_offer(offer, position, 0x12345678U, &lease, &message_type) &&
+          message_type == DHCP_MESSAGE_OFFER && lease.address == NET_IPV4(10, 0, 2, 20) &&
+          lease.netmask == NET_IPV4(255, 255, 255, 0) &&
+          lease.gateway == NET_IPV4(10, 0, 2, 2) && lease.dns == NET_IPV4(10, 0, 2, 3) &&
+          lease.server == NET_IPV4(10, 0, 2, 2) && lease.lease_seconds == 3600,
+          "dhcp parses offer addresses and lease options");
+    check(!dhcp_parse_offer(offer, position, 0x12345679U, &lease, &message_type),
+          "dhcp rejects offers with another transaction identifier");
+    check(dhcp_apply_lease(&lease) && net_config_get()->ip == NET_IPV4(10, 0, 2, 20),
+          "dhcp applies the received lease to the network configuration");
+    *(struct net_config *)net_config_get() = saved_config;
+    arp_cache_clear();
+    dns_cache_clear();
+    check(dns_cache_insert("example.com", NET_IPV4(93, 184, 216, 34), 60, false),
+          "dns cache stores positive answers");
+    u32 cached_address = 0;
+    bool cached_negative = false;
+    check(dns_cache_lookup("example.com", &cached_address, &cached_negative) &&
+          !cached_negative && cached_address == NET_IPV4(93, 184, 216, 34),
+          "dns cache lookup returns stored addresses");
+    check(!dns_cache_lookup("missing.example", &cached_address, &cached_negative),
+          "dns cache reports misses for unknown names");
+    check(dns_cache_insert("bad.example", 0, 30, true), "dns cache stores negative answers");
+    check(dns_cache_lookup("bad.example", &cached_address, &cached_negative) && cached_negative,
+          "dns cache lookup reports negative entries");
+    check(dns_cache_count() == 2 && dns_cache_negative_count() == 1,
+          "dns cache tracks positive and negative entry counts");
+    dns_cache_expire_all();
+    check(dns_cache_count() == 0, "dns cache expires entries");
+    dns_cache_clear();
+    check(dns_cache_insert("cached.example", NET_IPV4(1, 2, 3, 4), 60, false),
+          "dns cache accepts a warm entry for resolution");
+    u32 warm_address = 0;
+    check(dns_resolve("cached.example", &warm_address, 100) == 0 &&
+          warm_address == NET_IPV4(1, 2, 3, 4) && dns_cache_hits() == 1 &&
+          dns_cache_misses() == 0,
+          "dns resolve returns cached answers without a query");
+    check(dns_cache_insert("blocked.example", 0, 30, true),
+          "dns cache accepts a negative entry for resolution");
+    check(dns_resolve("blocked.example", &warm_address, 100) != 0 && dns_cache_hits() == 2,
+          "dns resolve honors cached negative answers");
+    const char *http_ok = "HTTP/1.0 200 OK\r\nContent-Length: 11\r\nContent-Type: text/plain\r\n"
+                          "\r\nhello world";
+    struct http_response response;
+    check(http_parse_response(http_ok, (u32)strlen(http_ok), &response) == 0 &&
+          response.status == 200 && response.body_length == 11 &&
+          response.declared_length == 11 && response.complete,
+          "http parses status line and content length");
+    const char *http_missing = "HTTP/1.0 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+    check(http_parse_response(http_missing, (u32)strlen(http_missing), &response) == 0 &&
+          response.status == 404 && response.body_length == 0,
+          "http parses error responses");
+    const char *http_truncated = "HTTP/1.0 200 OK\r\nContent-Length: 100\r\n\r\npartial";
+    check(http_parse_response(http_truncated, (u32)strlen(http_truncated), &response) == 0 &&
+          !response.complete && response.body_length == 7,
+          "http marks short bodies as incomplete");
+    check(http_parse_response("garbage", 7, &response) != 0,
+          "http rejects responses without a status line");
+    char host[64];
+    char path[64];
+    u16 port = 0;
+    check(http_parse_url("http:" "/" "/10.0.2.2:8080/index.html", host, sizeof(host), &port, path,
+                         sizeof(path)) == 0 &&
+          strcmp(host, "10.0.2.2") == 0 && port == 8080 && strcmp(path, "/index.html") == 0,
+          "http parses a url with a port and path");
+    check(http_parse_url("http:" "/" "/example.com", host, sizeof(host), &port, path, sizeof(path)) == 0 &&
+          strcmp(host, "example.com") == 0 && port == 80 && strcmp(path, "/") == 0,
+          "http parses a url without a path");
+    check(http_parse_url("https:" "/" "/example.com/", host, sizeof(host), &port, path, sizeof(path)) != 0,
+          "http rejects non http schemes");
+    socket_init();
+    int owner_socket = socket_create_for_owner(777, SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(owner_socket > 0 && socket_owner(owner_socket) == 777 &&
+          socket_owner_count(777) == 1,
+          "sockets record the owning process");
+    check(socket_bind(owner_socket, 0, 4900) == 0, "owned socket binds a udp port");
+    socket_cleanup_process(777);
+    check(!socket_valid(owner_socket) && socket_owner_count(777) == 0,
+          "process cleanup closes owned sockets");
+    check(udp_bind(4900) >= 0, "process cleanup releases the udp port");
+    udp_unbind(4900);
+    u32 tcp_before = tcp_connection_count();
+    int owner_listener = socket_create_for_owner(778, SOCKET_AF_INET, SOCKET_SOCK_STREAM, 0);
+    check(owner_listener > 0 && socket_bind(owner_listener, 0, 4901) == 0 &&
+          tcp_connection_count() == tcp_before + 1,
+          "owned stream socket opens a tcp listener");
+    socket_cleanup_process(778);
+    check(tcp_connection_count() == tcp_before && !socket_valid(owner_listener),
+          "process cleanup closes owned tcp connections");
+    socket_cleanup_process(999);
+    check(socket_owner_count(999) == 0, "process cleanup ignores unknown owners");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1593,6 +1779,7 @@ void selftest_thread(void *argument)
     test_vga_text_restore();
     test_network();
     test_tcp();
+    test_internet();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

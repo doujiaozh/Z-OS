@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.8.0 implementation as it exists in this
+This document describes the Z-OS 0.9.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.8.0:
+Non-goals for 0.9.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -38,6 +38,7 @@ Non-goals for 0.8.0:
 | Storage | ATA primary channel polled PIO at 0x1F0, control 0x3F6 |
 | Network | PCI e1000 82540EM, MMIO BAR, RX and TX descriptor rings, IRQ line from PCI config |
 | Transport | TCP control blocks, delayed acknowledgements not implemented, retransmission timer from network polling |
+| Internet | DHCP client, DNS cache with negative entries, HTTP 1.0 GET client, socket process ownership |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
 
@@ -919,6 +920,62 @@ default, settable at runtime with `dnsserver` and `dnsport`) and parses the
 response: transaction identifier, response bit, result code, question skipping
 and answer iteration with compression pointer support. The first A record with
 class IN yields the IPv4 address.
+
+## DHCP client
+
+`kernel/net/dhcp.c` implements the client side of DHCP:
+
+- Discovery builds a BOOTP style message with the transaction identifier, the
+  broadcast flag, the client hardware address, the magic cookie and options for
+  message type, client identifier, parameter request list and the requested
+  address. It is sent as an IPv4 broadcast frame to port 67 from port 68.
+- The offer parser validates the reply opcode, the transaction identifier, the
+  magic cookie and the option bounds before reading the offered address,
+  subnet mask, router, DNS server, server identifier and lease time.
+- After an offer the client sends a request naming the offered address and the
+  server, waits for the acknowledgement and applies the lease through
+  `dhcp_apply_lease`, which updates the address, netmask, gateway and DNS server
+  in the network configuration and clears the ARP cache.
+- Lease acquisition is bounded by a timeout split across polling rounds; the
+  shell command `dhcp` reports the resulting lease.
+
+## DNS cache
+
+`kernel/net/dns.c` keeps an eight entry cache with a 64 byte name key, the
+address, the raw TTL, an expiry timestamp from `timer_uptime_ms` and a negative
+flag. Positive answers are cached with the record TTL from the response
+(default 60 seconds when absent); failed lookups are cached negatively for five
+seconds. `dns_resolve` checks the cache first, returns cached negatives as
+failures, and only issues a query on a miss. `dnscache` prints entries and hit
+and miss counters, and the automation asserts that a second resolution of the
+same name produces no second query.
+
+## HTTP client
+
+`kernel/net/http.c` implements a minimal HTTP/1.0 client:
+
+- URL parsing accepts `http://host[:port][/path]` and defaults the port to 80
+  and the path to `/`.
+- `http_get` opens a stream socket, connects, sends a GET request with a Host
+  header and a Connection close header, accumulates the response up to 4096
+  bytes and parses it.
+- Response parsing extracts the status code, locates the header terminator,
+  reads Content-Length and the chunked transfer flag, and reports whether the
+  body is complete.
+- Only 2xx responses are treated as success; the body is copied to the caller
+  buffer with a trailing zero.
+
+## Socket ownership
+
+`kernel/net/socket.c` records the creating process identifier in every socket
+record. `socket_create` takes the current process identifier, while
+`socket_create_for_owner` allows explicit ownership for tests. When a process is
+marked as a zombie, `process_mark_zombie` calls `socket_cleanup_process`, which
+iterates the socket table, unbinds UDP ports, closes TCP control blocks and
+clears the entries. A ring 3 process that leaks sockets therefore releases its
+ports and connections on exit, which the internet verification stage asserts by
+checking that the tables are empty and that the leaked listening port can be
+bound again immediately.
 
 ## Console and shell
 

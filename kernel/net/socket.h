@@ -23,5 +23,9 @@ int socket_connect(int descriptor, u32 address, u16 port, u32 timeout_ms);
 int socket_accept(int descriptor, u32 timeout_ms);
 int socket_send(int descriptor, const void *data, u32 length);
 int socket_recv(int descriptor, void *buffer, u32 capacity, u32 timeout_ms);
+int socket_create_for_owner(u32 owner, u32 domain, u32 type, u32 protocol);
+u32 socket_owner(int descriptor);
+void socket_cleanup_process(u32 owner);
+u32 socket_owner_count(u32 owner);
 
 #endif

@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.8.0 Transport. It is deliberately conservative. The system is a development
+0.9.0 Internet. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -99,6 +99,13 @@ prototype and must not be used to protect sensitive data.
   bounded and out of order data is acknowledged but not stored.
 - Sockets validate every user buffer and cap TCP transfers at 2048 bytes per
   call; DNS names, query sizes and response sizes are bounded.
+- DHCP messages validate the reply opcode, transaction identifier, magic cookie
+  and every option length before applying a lease, and a lease only changes the
+  runtime network configuration.
+- The HTTP client bounds URL, host and path lengths, caps the response at 4096
+  bytes, validates the status line and only copies the declared body length.
+- Sockets record their owning process and are force closed when the owner exits,
+  releasing UDP ports and TCP connections.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -112,6 +119,19 @@ prototype and must not be used to protect sensitive data.
 Each process owns a private PML4 and user page tables, and user frames are not
 shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
+
+Internet surfaces are not yet a security boundary:
+
+- DHCP is unauthenticated; a rogue server on the link can hand out an address,
+  gateway and DNS server of its choosing.
+- The DNS cache is not protected against poisoning: entries are keyed only by
+  name, responses are not validated against the source address and negative
+  entries are cached on any failure.
+- HTTP has no TLS, no certificate validation, no redirect policy and no
+  response size negotiation beyond the fixed buffer.
+- Socket ownership covers the cleanup path but not authorization: descriptors
+  remain globally numbered and a process identifier is not verified for
+  descriptor access.
 
 Transport surfaces are not yet a security boundary:
 
@@ -306,20 +326,23 @@ ELF validation, syscall pointer validation in the process address space,
 descriptor table isolation across fork, credential permission checks, signal
 frame validation and CR3 switching, blocking wait restart, ATA range checks,
 ZFS superblock validation, e1000 DMA buffer ownership, IPv4 header validation,
-TCP checksum and sequence validation, ARP, UDP and DNS bounds checks, mouse
-packet decoding and bounds clamping, text pointer save and restore, compositor
-layering, desktop hit testing, process reaping, and exception containment are
-implemented and tested.
+TCP checksum and sequence validation, DHCP option bounds, DNS and HTTP buffer
+bounds, socket ownership cleanup, mouse packet decoding and bounds clamping,
+text pointer save and restore, compositor layering, desktop hit testing,
+process reaping, and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. TCP hardening: SYN backlog limits, randomized initial sequence numbers from
-   an entropy source, per-process socket ownership and socket close on exit.
-2. DNS response validation by source address and a bounded DNS cache with
-   negative caching disabled by default.
-3. Network input validation hardening: ARP cache limits with aging, TTL
+1. TCP hardening: SYN backlog limits and randomized initial sequence numbers
+   from an entropy source.
+2. DNS response validation by source address, cache keyed by server, and
+   negative caching only for authoritative failures.
+3. DHCP option validation policy and optional static configuration override.
+4. TLS style transport security, certificate validation and an HTTP client with
+   redirect and size policy.
+5. Network input validation hardening: ARP cache limits with aging, TTL
    handling, fragment rejection policy and frame queue accounting.
-4. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
+6. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
    permissions and path validation.
 4. VFS owner and mode storage so credentials actually gate file access, plus
    a non-root default identity for spawned processes.

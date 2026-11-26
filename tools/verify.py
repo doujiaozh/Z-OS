@@ -97,7 +97,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=322 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=354 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -1169,9 +1169,186 @@ def run_tcp():
                 process.wait()
 
 
+def run_internet():
+    print("== internet client test ==")
+    qemu = find_qemu()
+    port = free_port()
+    dns_port = free_port()
+    http_port = free_port()
+    user_port = 34567
+    echo_payloads = []
+    user_payloads = []
+    http_requests = []
+    dns_queries = []
+    servers = []
+
+    def start_echo_server(listen_port, payload_store):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", listen_port))
+        server.listen(4)
+        servers.append(server)
+
+        def worker():
+            while True:
+                try:
+                    client, _ = server.accept()
+                except OSError:
+                    return
+                try:
+                    data = client.recv(1024)
+                    payload_store.append(data)
+                    client.sendall(data)
+                finally:
+                    client.close()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_http_server(listen_port):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", listen_port))
+        server.listen(4)
+        servers.append(server)
+
+        def worker():
+            while True:
+                try:
+                    client, _ = server.accept()
+                except OSError:
+                    return
+                try:
+                    data = client.recv(1024)
+                    http_requests.append(data)
+                    body = b"Z-OS-HTTP-BODY"
+                    response = (b"HTTP/1.0 200 OK\r\nContent-Length: " +
+                                str(len(body)).encode() + b"\r\nContent-Type: text/plain\r\n\r\n" +
+                                body)
+                    client.sendall(response)
+                finally:
+                    client.close()
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def start_dns_server(listen_port):
+        server = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", listen_port))
+        servers.append(server)
+
+        def worker():
+            while True:
+                try:
+                    data, address = server.recvfrom(512)
+                except OSError:
+                    return
+                dns_queries.append(data)
+                response = bytearray(data)
+                response[2] = 0x81
+                response[3] = 0x80
+                response[6] = 0
+                response[7] = 1
+                response = bytes(response) + bytes([0xC0, 0x0C, 0x00, 0x01, 0x00, 0x01,
+                                                    0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
+                                                    93, 184, 216, 34])
+                try:
+                    server.sendto(response, address)
+                except OSError:
+                    return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    start_echo_server(echo_port, echo_payloads) if False else None
+    start_echo_server(user_port, user_payloads)
+    start_http_server(http_port)
+    start_dns_server(dns_port)
+    command = [qemu] + base_drive("z-os.img") + [
+        "-display", "none",
+        "-serial", "tcp:127.0.0.1:" + str(port) + ",server=on,wait=off",
+        "-netdev", "user,id=n0",
+        "-device", "e1000,netdev=n0",
+    ]
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    connection = None
+    session = None
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if process.poll() is not None:
+                raise CheckFailure("internet test QEMU exited early")
+            try:
+                connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                break
+            except OSError:
+                time.sleep(0.3)
+        if connection is None:
+            raise CheckFailure("could not connect to the internet test serial port")
+        session = SerialSession(connection)
+        session.send_line("")
+        session.wait_for("z-os:", 20)
+
+        def run_command(command_line, expected, timeout=60):
+            start = len(session.snapshot())
+            session.send_line(command_line)
+            prompt = session.wait_for("z-os:", timeout, start + len(command_line) + 1)
+            segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
+            for marker in expected:
+                if marker not in segment:
+                    raise CheckFailure("internet command '" + command_line +
+                                       "' missing marker: " + marker + "\n" + segment)
+            return segment
+
+        run_command("dhcp", ["dhcp: ip 10.0.2.15", "dhcp: gateway 10.0.2.2",
+                             "dhcp: server 10.0.2.2"], timeout=90)
+        run_command("dnsserver 10.0.2.2", ["dns server set"])
+        run_command("dnsport " + str(dns_port), ["dns server port set"])
+        run_command("dns example.com", ["dns: example.com resolved to 93.184.216.34"])
+        run_command("dns example.com", ["dns: example.com resolved to 93.184.216.34"])
+        cache_output = run_command("dnscache", ["dns cache hits: 1", "example.com"])
+        if "93.184.216.34" not in cache_output:
+            raise CheckFailure("dns cache does not report the resolved address")
+        if len(dns_queries) != 1:
+            raise CheckFailure("dns cache did not suppress the second query, received " +
+                               str(len(dns_queries)))
+        run_command("http get http:" + "/" + "/10.0.2.2:" + str(http_port) + "/index.html",
+                    ["Z-OS-HTTP-BODY", "returned"])
+        if not http_requests or b"GET /index.html HTTP/1.0" not in http_requests[0]:
+            raise CheckFailure("http server did not receive the request line")
+        run_command("sockinfo", ["sockets: 0"])
+        run_command("nettest2", ["nettest2: tcp echo verified", "nettest2: exit status 0",
+                                 "leaving sockets open for cleanup"], timeout=90)
+        if not user_payloads:
+            raise CheckFailure("tcp user program payload was not received by the host")
+        cleanup_output = run_command("sockinfo", ["sockets: 0", "tcp connections: 0"])
+        if "udp sockets: 0" not in cleanup_output:
+            raise CheckFailure("udp sockets were not reclaimed after process exit\n" + cleanup_output)
+        run_command("tcplisten 34568 200", ["tcp: listening on port 34568"], timeout=30)
+        print("dhcp lease, dns cache, http get and socket cleanup PASS")
+        session.send_line("shutdown")
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise CheckFailure("internet test did not power off")
+    finally:
+        for server in servers:
+            try:
+                server.close()
+            except OSError:
+                pass
+        if session is not None:
+            session.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "network", "tcp", "gui", "keyboard", "shell", "all"])
+    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "network", "tcp", "internet", "gui", "keyboard", "shell", "all"])
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     if args.action == "build":
@@ -1193,6 +1370,8 @@ def main():
         run_network()
     if args.action in ("tcp", "all"):
         run_tcp()
+    if args.action in ("internet", "all"):
+        run_internet()
     if args.action in ("gui", "all"):
         run_gui()
     if args.action in ("keyboard", "all"):
