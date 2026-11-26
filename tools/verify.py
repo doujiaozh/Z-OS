@@ -82,6 +82,8 @@ def run_selftest():
     command = [qemu] + base_drive("z-os-test.img") + disk_drive("z-os-testdisk.img") + [
         "-display", "none",
         "-serial", "file:" + str(log_path),
+        "-netdev", "user,id=n0",
+        "-device", "e1000,netdev=n0",
         "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
     ]
     process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
@@ -95,7 +97,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=267 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=301 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -902,9 +904,89 @@ def run_gui():
                 process.wait()
 
 
+def run_network():
+    print("== network stack test ==")
+    qemu = find_qemu()
+    port = free_port()
+    monitor_port = free_port()
+    udp_host_port = free_port()
+    command = [qemu] + base_drive("z-os.img") + [
+        "-display", "none",
+        "-serial", "tcp:127.0.0.1:" + str(port) + ",server=on,wait=off",
+        "-netdev", "user,id=n0,hostfwd=udp:127.0.0.1:" + str(udp_host_port) + "-:" + str(udp_host_port),
+        "-device", "e1000,netdev=n0",
+    ]
+    process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    connection = None
+    session = None
+    udp_client = None
+    try:
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if process.poll() is not None:
+                raise CheckFailure("network test QEMU exited early")
+            try:
+                connection = socket.create_connection(("127.0.0.1", port), timeout=0.5)
+                break
+            except OSError:
+                time.sleep(0.3)
+        if connection is None:
+            raise CheckFailure("could not connect to the network test serial port")
+        session = SerialSession(connection)
+        session.send_line("")
+        session.wait_for("z-os:", 20)
+        tests = [
+            ("netinfo", ["net: link up", "net: mac 52:54:", "net: ip 10.0.2.15",
+                         "net: gateway 10.0.2.2"]),
+            ("arp 10.0.2.2", ["arp: 10.0.2.2 is at 52:55:"]),
+            ("ping 10.0.2.2 4", ["ping: reply from 10.0.2.2", "ping: 4/4 replies"]),
+        ]
+        for command_line, expected in tests:
+            start = len(session.snapshot())
+            session.send_line(command_line)
+            prompt = session.wait_for("z-os:", 30, start + len(command_line) + 1)
+            segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
+            for marker in expected:
+                if marker not in segment:
+                    raise CheckFailure("network command '" + command_line +
+                                       "' missing marker: " + marker + "\n" + segment)
+        udp_client = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_client.settimeout(6.0)
+        start = len(session.snapshot())
+        session.send_line("udp-echo " + str(udp_host_port) + " 6000")
+        session.wait_for("udp-echo: listening", 20, start)
+        time.sleep(0.5)
+        udp_client.sendto(b"z-os-network-echo", ("127.0.0.1", udp_host_port))
+        try:
+            reply, address = udp_client.recvfrom(1024)
+        except socket.timeout:
+            raise CheckFailure("udp echo reply was not received on the host")
+        if reply != b"z-os-network-echo":
+            raise CheckFailure("udp echo payload mismatch: " + str(reply))
+        session.wait_for("udp-echo: echoed", 20)
+        print("network discovery, arp, icmp and udp echo PASS")
+        session.send_line("shutdown")
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise CheckFailure("network test did not power off")
+    finally:
+        if udp_client is not None:
+            udp_client.close()
+        if session is not None:
+            session.close()
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "gui", "keyboard", "shell", "all"])
+    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "network", "gui", "keyboard", "shell", "all"])
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     if args.action == "build":
@@ -922,6 +1004,8 @@ def main():
         run_bootcheck()
     if args.action in ("storage", "all"):
         run_storage()
+    if args.action in ("network", "all"):
+        run_network()
     if args.action in ("gui", "all"):
         run_gui()
     if args.action in ("keyboard", "all"):

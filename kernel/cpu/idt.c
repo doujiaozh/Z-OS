@@ -4,6 +4,7 @@
 #include "io.h"
 #include "lib.h"
 #include "console.h"
+#include "e1000.h"
 #include "keyboard.h"
 #include "serial.h"
 #include "timer.h"
@@ -131,6 +132,8 @@ void interrupt_dispatch(struct registers *registers) {
             serial_irq_handler();
         } else if (irq == 12) {
             mouse_irq_handler();
+        } else if (e1000_present() && irq == e1000_irq_line()) {
+            e1000_irq_handler();
         }
         return;
     }

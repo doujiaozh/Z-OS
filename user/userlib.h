@@ -45,6 +45,11 @@ struct mouse_user_state {
 #define ZO_SYS_SIGPROCMASK 21
 #define ZO_SYS_GUI_ENTER 25
 #define ZO_SYS_GUI_EXIT 26
+#define ZO_SYS_SOCKET 27
+#define ZO_SYS_BIND 28
+#define ZO_SYS_SENDTO 29
+#define ZO_SYS_RECVFROM 30
+#define ZO_SYS_SOCKET_CLOSE 31
 
 static inline long zsys3(long number, long first, long second, long third) {
     __asm__ volatile("int $0x80"
@@ -168,6 +173,31 @@ static inline long zgui_enter(void)
 static inline long zgui_exit(void)
 {
     return zsys3(ZO_SYS_GUI_EXIT, 0, 0, 0);
+}
+
+static inline long zsocket(void)
+{
+    return zsys3(ZO_SYS_SOCKET, 2, 2, 0);
+}
+
+static inline long zbind(long descriptor, long port)
+{
+    return zsys3(ZO_SYS_BIND, descriptor, port, 0);
+}
+
+static inline long zsendto(long descriptor, long address, long port, const void *data, long length)
+{
+    return zsys5(ZO_SYS_SENDTO, descriptor, address, port, length, (long)data);
+}
+
+static inline long zrecvfrom(long descriptor, void *buffer, long capacity, long timeout_ms)
+{
+    return zsys5(ZO_SYS_RECVFROM, descriptor, (long)buffer, capacity, timeout_ms, 0);
+}
+
+static inline long zsocket_close(long descriptor)
+{
+    return zsys3(ZO_SYS_SOCKET_CLOSE, descriptor, 0, 0);
 }
 
 static inline long zmouse(struct mouse_user_state *state) {

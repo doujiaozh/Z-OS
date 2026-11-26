@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.6.0 Desktop. It is deliberately conservative. The system is a development
+0.7.0 Network. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -84,6 +84,16 @@ prototype and must not be used to protect sensitive data.
 - The desktop session runs inside the kernel shell thread and copies no user
   pointers, so a user process cannot supply UI state directly; syscalls 25 and
   26 only set request flags.
+- Socket system calls validate domain and type, validate every user buffer
+  against the caller address space before copying, cap datagram sizes at 512
+  bytes, reject unbound descriptors and reject address zero.
+- The e1000 driver validates frame sizes before transmission and copies frames
+  into fixed DMA buffers owned by the kernel; received frames are length
+  checked against the descriptor before dispatch and the raw frame queue is
+  bounded.
+- The network stack validates Ethernet length, IPv4 version, header length,
+  total length and header checksum before dispatching, and bounds every
+  protocol payload by the IPv4 total length.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -97,6 +107,24 @@ prototype and must not be used to protect sensitive data.
 Each process owns a private PML4 and user page tables, and user frames are not
 shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
+
+Network surfaces are not yet a security boundary:
+
+- There is no authentication, encryption, firewall or packet filtering; any
+  host that can reach the QEMU user network can send ARP, ICMP and UDP frames
+  to the guest.
+- The ARP cache has eight entries with no locking and no aging; a flood of ARP
+  replies can evict legitimate entries.
+- The UDP receive queue is four datagrams per socket and silently drops excess
+  traffic; there is no backpressure and no ICMP error reporting to applications.
+- Socket descriptors are process agnostic global objects; a descriptor created
+  by one process can be used by another if the number is guessed, and closing a
+  process does not close its sockets.
+- The IPv4 stack does not implement fragmentation, reassembly, broadcast
+  filtering or TTL decrementing for forwarded traffic.
+- The e1000 driver trusts descriptor status bits and does not validate the
+  receive length against the buffer beyond clamping, and the raw frame queue
+  drops frames silently when full.
 
 Storage and desktop surfaces are not yet a security boundary:
 
@@ -257,29 +285,34 @@ Within that model, the ring transition, per-process user/supervisor page bits,
 ELF validation, syscall pointer validation in the process address space,
 descriptor table isolation across fork, credential permission checks, signal
 frame validation and CR3 switching, blocking wait restart, ATA range checks,
-ZFS superblock validation, mouse packet decoding and bounds clamping, text
+ZFS superblock validation, e1000 DMA buffer ownership, IPv4 header validation,
+ARP and UDP bounds checks, mouse packet decoding and bounds clamping, text
 pointer save and restore, compositor layering, desktop hit testing, process
 reaping, and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
+1. Socket ownership per process, socket close on exit and a bounded receive
+   path with ICMP error reporting.
+2. Network input validation hardening: ARP cache limits with aging, TTL
+   handling, fragment rejection policy and frame queue accounting.
+3. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
    permissions and path validation.
-2. VFS owner and mode storage so credentials actually gate file access, plus
+4. VFS owner and mode storage so credentials actually gate file access, plus
    a non-root default identity for spawned processes.
-3. A user-space display client model with clipping, damage and per-window
+5. A user-space display client model with clipping, damage and per-window
    capabilities instead of a kernel-owned desktop.
 2. Ownership checks for `kill`, sessions, process groups, and job control.
-4. NX, W^X, SMEP, SMAP, and UMIP.
-5. Stack guard pages and a slab allocator with redzones.
-6. Descriptor reference counts and per-process quotas.
-7. Copy-on-write fork and per-process memory accounting.
-8. Screen read policy and an opt-in input focus model for the desktop.
-9. Cryptographic random source from hardware or a seeded entropy pool.
-10. ACPI table parsing instead of fixed power ports.
-11. Signed boot and measured boot.
-12. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
-13. KASLR and ASLR.
+6. NX, W^X, SMEP, SMAP, and UMIP.
+7. Stack guard pages and a slab allocator with redzones.
+8. Descriptor reference counts and per-process quotas.
+9. Copy-on-write fork and per-process memory accounting.
+10. Screen read policy and an opt-in input focus model for the desktop.
+11. Cryptographic random source from hardware or a seeded entropy pool.
+12. ACPI table parsing instead of fixed power ports.
+13. Signed boot and measured boot.
+14. Syscall fuzzing, scheduler stress tests, and a kernel sanitizer build.
+15. KASLR and ASLR.
 
 ## Reporting
 

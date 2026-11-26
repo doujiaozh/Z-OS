@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.6.0 implementation as it exists in this
+This document describes the Z-OS 0.7.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.6.0:
+Non-goals for 0.7.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -36,6 +36,7 @@ Non-goals for 0.6.0:
 | Serial | 16550-compatible COM1 at 0x3F8, interrupt vector 36 |
 | Mouse | PS/2 auxiliary device, interrupt vector 44 |
 | Storage | ATA primary channel polled PIO at 0x1F0, control 0x3F6 |
+| Network | PCI e1000 82540EM, MMIO BAR, RX and TX descriptor rings, IRQ line from PCI config |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
 
@@ -580,6 +581,11 @@ Syscall ABI:
 | 24 | mouse | RDI=state buffer | 0 or -1 |
 | 25 | gui_enter | none | requests a desktop session |
 | 26 | gui_exit | none | requests leaving the desktop session |
+| 27 | socket | RDI=domain, RSI=type, RDX=protocol | socket descriptor or -1 |
+| 28 | bind | RDI=descriptor, RSI=port | 0 or -1 |
+| 29 | sendto | RDI=fd, RSI=address, RDX=port, R10=data, R8=length | bytes sent or -1 |
+| 30 | recvfrom | RDI=fd, RSI=buffer, RDX=capacity, R10=timeout, R8=source ip out, R9=source port out | bytes received or -1 |
+| 31 | socket_close | RDI=descriptor | 0 or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -806,6 +812,61 @@ thread:
   checks after each command, so a ring-3 program can ask for a session change
   without owning the console.
 
+## PCI enumeration and e1000 driver
+
+`kernel/drivers/pci.c` provides configuration space access through ports 0xCF8
+and 0xCFC, device search by vendor and device identifier, BAR decoding and a
+helper that sets the memory space and bus master bits in the PCI command
+register. Without bus master enable the NIC cannot DMA descriptor rings or
+buffers, which silently prevents both transmission and reception.
+
+`kernel/drivers/e1000.c` drives the Intel 82540EM:
+
+- The BAR0 memory window is mapped into the shared device window with cache
+  disable and write through attributes.
+- Reset through CTRL.RST, link up through CTRL.SLU, MAC address from RAL and
+  RAH, multicast table cleared, receive and transmit rings allocated from the
+  physical memory manager so that descriptor and buffer addresses are identity
+  mapped physical addresses. Heap memory is not identity mapped, so heap
+  addresses must never be handed to the NIC.
+- 32 receive descriptors with 2048 byte buffers and 16 transmit descriptors,
+  legacy descriptor layouts, RCTL with broadcast accept, 2048 byte buffers and
+  CRC stripping, TCTL with pad short packets and collision parameters.
+- The interrupt handler only drains hardware descriptors into a small raw frame
+  queue; protocol processing runs in thread context from `net_poll`, which
+  keeps ARP resolution and reply generation out of interrupt context. The timer
+  tick also drains raw frames so reception works even if the PCI interrupt line
+  is not delivered.
+
+## Network stack
+
+`kernel/net` implements a small IPv4 stack:
+
+- `net.c` holds the configuration (MAC, 10.0.2.15, gateway 10.0.2.2, netmask
+  255.255.255.0), byte order helpers, the internet checksum, dotted address
+  parsing and formatting, frame counters and the receive entry point.
+- `eth.c` parses 14 byte Ethernet headers, dispatches ARP and IPv4 frames and
+  builds outgoing frames with the configured source MAC.
+- `arp.c` keeps an eight entry cache, builds requests and replies, answers
+  requests for the local address and resolves addresses synchronously with a
+  ten millisecond polling loop.
+- `ipv4.c` builds and validates IPv4 headers including the header checksum,
+  chooses the next hop from the netmask, resolves the next hop through ARP and
+  dispatches ICMP and UDP payloads.
+- `icmp.c` answers echo requests, sends echo requests and implements a ping
+  that waits for a matching identifier and sequence.
+- `udp.c` provides eight sockets with a four entry receive queue per socket,
+  port binding, datagram transmission and reception with timeouts.
+- `socket.c` exposes socket descriptors 1 to 8 mapped onto UDP sockets.
+
+System calls 27 to 31 implement `socket`, `bind`, `sendto`, `recvfrom` and
+`socket_close`; user buffers are validated against the caller address space
+before copying.
+
+Shell commands `netinfo`, `arp`, `ping` and `udp-echo` expose the stack, and
+`udp-echo` can be driven from a host through a QEMU user mode UDP host forward,
+which is how the automated network stage performs a real round trip.
+
 ## Console and shell
 
 The console driver writes VGA text memory and mirrors output to COM1. Newlines
@@ -854,7 +915,7 @@ the emulator. There is no ACPI table parser or general chipset discovery.
 9. Write sizes and SHA-256 hashes to `build/manifest.json`.
 
 The compiler include path adds `kernel/mm`, `kernel/task`, `kernel/gui`,
-`kernel/fs`, and `kernel/drivers` for the
+`kernel/fs`, `kernel/drivers`, and `kernel/net` for the
 address-space and process interfaces. New C files are discovered recursively
 by the build script.
 

@@ -3,6 +3,8 @@
 #include "pic.h"
 #include "thread.h"
 #include "mouse.h"
+#include "e1000.h"
+#include "net.h"
 #include "sched.h"
 #include "waitq.h"
 
@@ -33,6 +35,9 @@ u64 timer_uptime_ms(void) {
 
 void timer_irq_handler(void) {
     ticks++;
+    if (e1000_present()) {
+        e1000_poll();
+    }
     mouse_text_cursor_update();
     waitq_expire(ticks);
     sched_user_tick();

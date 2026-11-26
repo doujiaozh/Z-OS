@@ -1,9 +1,15 @@
 #include "tests.h"
+#include "arp.h"
 #include "ata.h"
 #include "compositor.h"
 #include "console.h"
 #include "cred.h"
 #include "desktop.h"
+#include "e1000.h"
+#include "eth.h"
+#include "icmp.h"
+#include "ipv4.h"
+#include "net.h"
 #include "elf.h"
 #include "fd.h"
 #include "font.h"
@@ -20,6 +26,7 @@
 #include "process.h"
 #include "sched.h"
 #include "signal.h"
+#include "socket.h"
 #include "waitq.h"
 #include "mouse.h"
 #include "rtc.h"
@@ -27,6 +34,7 @@
 #include "thread.h"
 #include "timer.h"
 #include "user.h"
+#include "udp.h"
 #include "vfs.h"
 #include "vmm.h"
 #include "zfs.h"
@@ -1227,6 +1235,175 @@ static void test_vga_text_restore(void)
     check((fb_vga_text_cell(0, 0) & 0x00FF) == 'V',
           "text mode restore leaves a usable text buffer for the shell");
 }
+static void test_network(void)
+{
+    const struct net_config *config = net_config_get();
+    check(e1000_present(), "e1000 pci device is detected");
+    check(config->ready && config->ip == NET_IPV4(10, 0, 2, 15),
+          "network stack configures the guest ipv4 address");
+    bool mac_valid = false;
+    for (u32 index = 0; index < 6; index++) {
+        if (config->mac[index] != 0) {
+            mac_valid = true;
+        }
+    }
+    check(mac_valid, "e1000 reports a hardware mac address");
+    check(net_htons(0x1234) == 0x3412 && net_ntohs(0x3412) == 0x1234,
+          "network stack swaps 16 bit byte order");
+    check(net_htonl(0x01020304) == 0x04030201 && net_ntohl(0x04030201) == 0x01020304,
+          "network stack swaps 32 bit byte order");
+    u8 header[20];
+    memset(header, 0, sizeof(header));
+    header[0] = 0x45;
+    header[2] = 0;
+    header[3] = 20;
+    header[8] = 64;
+    header[9] = 17;
+    header[12] = 10;
+    header[13] = 0;
+    header[14] = 2;
+    header[15] = 15;
+    header[16] = 10;
+    header[17] = 0;
+    header[18] = 2;
+    header[19] = 2;
+    u16 checksum = (u16)net_checksum(header, 20);
+    check(checksum != 0, "ipv4 checksum computes a non-zero value");
+    header[10] = (u8)(checksum >> 8);
+    header[11] = (u8)(checksum & 0xFF);
+    check(net_checksum(header, 20) == 0, "ipv4 checksum verifies a complete header");
+    struct ipv4_header_view view;
+    check(ipv4_parse_header(header, 20, &view) && view.protocol == 17 &&
+          view.source == NET_IPV4(10, 0, 2, 15) && view.destination == NET_IPV4(10, 0, 2, 2),
+          "ipv4 header parser extracts addresses and protocol");
+    u8 corrupted[20];
+    memcpy(corrupted, header, 20);
+    corrupted[15] ^= 0xFF;
+    check(!ipv4_parse_header(corrupted, 20, &view), "ipv4 header parser rejects bad checksums");
+    check(net_parse_ip("10.0.2.2") == NET_IPV4(10, 0, 2, 2),
+          "network stack parses a dotted ipv4 address");
+    check(net_parse_ip("999.1.1.1") == 0 && net_parse_ip("10.0.2") == 0,
+          "network stack rejects malformed ipv4 addresses");
+    char ip_text[20];
+    net_format_ip(NET_IPV4(192, 168, 1, 1), ip_text, sizeof(ip_text));
+    check(strcmp(ip_text, "192.168.1.1") == 0, "network stack formats an ipv4 address");
+    u8 frame[64];
+    memset(frame, 0, sizeof(frame));
+    memcpy(frame, config->mac, 6);
+    frame[6] = 0x52;
+    frame[7] = 0x54;
+    frame[8] = 0x00;
+    frame[9] = 0x12;
+    frame[10] = 0x34;
+    frame[11] = 0x56;
+    frame[12] = 0x08;
+    frame[13] = 0x06;
+    struct eth_header eth;
+    check(eth_parse_header(frame, 14, &eth) && eth.type == ETH_TYPE_ARP,
+          "ethernet parser extracts the frame type");
+    check(!eth_parse_header(frame, 8, &eth), "ethernet parser rejects short frames");
+    arp_cache_clear();
+    u8 gateway_mac[6] = {0x52, 0x55, 0x0A, 0x00, 0x02, 0x02};
+    check(arp_cache_insert(NET_IPV4(10, 0, 2, 2), gateway_mac), "arp cache stores a new entry");
+    u8 resolved[6];
+    check(arp_cache_lookup(NET_IPV4(10, 0, 2, 2), resolved) && memcmp(resolved, gateway_mac, 6) == 0,
+          "arp cache returns the stored mac address");
+    check(!arp_cache_lookup(NET_IPV4(10, 0, 2, 99), resolved), "arp cache reports misses");
+    check(arp_cache_remove(NET_IPV4(10, 0, 2, 2)) && arp_cache_count() == 0,
+          "arp cache removes entries");
+    u8 arp_frame[14 + ARP_PACKET_SIZE];
+    memset(arp_frame, 0, sizeof(arp_frame));
+    memcpy(arp_frame, config->mac, 6);
+    memset(arp_frame + 6, 0x52, 6);
+    arp_frame[12] = 0x08;
+    arp_frame[13] = 0x06;
+    u8 *arp_packet = arp_frame + 14;
+    arp_packet[0] = 0;
+    arp_packet[1] = 1;
+    arp_packet[2] = 0x08;
+    arp_packet[3] = 0x00;
+    arp_packet[4] = 6;
+    arp_packet[5] = 4;
+    arp_packet[7] = ARP_OPERATION_REPLY;
+    memcpy(arp_packet + 8, gateway_mac, 6);
+    arp_packet[14] = 10;
+    arp_packet[15] = 0;
+    arp_packet[16] = 2;
+    arp_packet[17] = 2;
+    memcpy(arp_packet + 18, config->mac, 6);
+    arp_packet[24] = 10;
+    arp_packet[25] = 0;
+    arp_packet[26] = 2;
+    arp_packet[27] = 15;
+    u32 replies_before = arp_replies_received();
+    arp_receive(arp_frame, sizeof(arp_frame));
+    check(arp_replies_received() == replies_before + 1 && arp_cache_count() == 1,
+          "arp receive caches addresses from reply frames");
+    u32 requests_before = arp_requests_sent();
+    check(arp_send_request(NET_IPV4(10, 0, 2, 2)) == 0 &&
+          arp_requests_sent() == requests_before + 1,
+          "arp sends broadcast requests through the e1000");
+    udp_unbind(4500);
+    int udp_index = udp_bind(4500);
+    check(udp_index >= 0 && udp_socket_used((u32)udp_index),
+          "udp binds a local port");
+    check(udp_bind(4500) < 0, "udp rejects duplicate port binds");
+    const char *payload = "z-os-udp-payload";
+    check(udp_inject_datagram(4500, NET_IPV4(10, 0, 2, 2), 9000, payload,
+                              (u32)strlen(payload)) == 0,
+          "udp queues injected datagrams");
+    char received[64];
+    memset(received, 0, sizeof(received));
+    u32 source_ip = 0;
+    u16 source_port = 0;
+    int received_length = udp_recv((u32)udp_index, received, sizeof(received), 100,
+                                   &source_ip, &source_port);
+    check(received_length == (int)strlen(payload) && strcmp(received, payload) == 0 &&
+          source_ip == NET_IPV4(10, 0, 2, 2) && source_port == 9000,
+          "udp delivers datagram payloads with source information");
+    check(udp_recv((u32)udp_index, received, sizeof(received), 30, NULL, NULL) < 0,
+          "udp receive times out when the queue is empty");
+    check(udp_unbind(4500) == 0 && !udp_socket_used((u32)udp_index),
+          "udp releases bound ports");
+    socket_init();
+    int descriptor = socket_create(SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(descriptor > 0, "socket layer creates a udp descriptor");
+    check(socket_bind(descriptor, 0, 4600) == 0 && socket_bound_port(descriptor) == 4600,
+          "socket layer binds a local port");
+    check(udp_inject_datagram(4600, NET_IPV4(10, 0, 2, 2), 9010, "socket-data", 11) == 0,
+          "socket layer receives injected datagrams");
+    char socket_buffer[32];
+    memset(socket_buffer, 0, sizeof(socket_buffer));
+    int socket_length = socket_recvfrom(descriptor, socket_buffer, sizeof(socket_buffer), 100,
+                                        &source_ip, &source_port);
+    check(socket_length == 11 && strcmp(socket_buffer, "socket-data") == 0,
+          "socket recvfrom returns the queued payload");
+    check(socket_close(descriptor) == 0 && !socket_valid(descriptor),
+          "socket close releases the descriptor");
+    check(socket_recvfrom(descriptor, socket_buffer, sizeof(socket_buffer), 10, NULL, NULL) < 0,
+          "socket rejects operations after close");
+    arp_cache_clear();
+    arp_cache_insert(config->ip, config->mac);
+    u8 icmp_packet[16];
+    memset(icmp_packet, 0, sizeof(icmp_packet));
+    icmp_packet[0] = ICMP_TYPE_ECHO_REQUEST;
+    icmp_packet[4] = 0x12;
+    icmp_packet[5] = 0x34;
+    icmp_packet[6] = 0;
+    icmp_packet[7] = 1;
+    memcpy(icmp_packet + 8, "Z-OSPING", 8);
+    u16 icmp_checksum = (u16)net_checksum(icmp_packet, 16);
+    icmp_packet[2] = (u8)(icmp_checksum >> 8);
+    icmp_packet[3] = (u8)(icmp_checksum & 0xFF);
+    u32 answered_before = icmp_requests_answered();
+    icmp_receive(icmp_packet, 16, config->ip);
+    check(icmp_requests_answered() == answered_before + 1,
+          "icmp answers incoming echo requests");
+    u32 frames_before = net_frames_received();
+    net_receive_frame(arp_frame, sizeof(arp_frame));
+    check(net_frames_received() == frames_before + 1,
+          "network receive path accounts incoming frames");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1259,6 +1436,7 @@ void selftest_thread(void *argument)
     test_desktop();
     test_gui_mode();
     test_vga_text_restore();
+    test_network();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

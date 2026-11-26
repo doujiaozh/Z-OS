@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.6.0 Desktop |
+| Version | 0.7.0 Network |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -65,11 +65,18 @@ exit device. A successful run returns host exit status 33, which is
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=267 failed=0
+ZTEST SUMMARY passed=301 failed=0
 ZTEST RESULT PASS
 ```
 
-The original 253 checks remain in place. This milestone adds 14 checks
+The original 267 checks remain in place. This milestone adds 34 checks
+covering e1000 detection, MAC and address configuration, byte order conversion,
+IPv4 checksum computation and verification, IPv4 header parsing and rejection,
+dotted address parsing and formatting, Ethernet frame parsing, ARP cache
+insertion, lookup, removal, reply handling and request transmission, UDP
+binding, duplicate rejection, datagram delivery with source information,
+timeout behaviour and unbinding, socket descriptor lifecycle, ICMP echo request
+answering, and receive path accounting. A further milestone added 14 checks
 covering double buffer allocation, partial and full frame presentation, dirty
 rectangle merging, VGA CRTC timing readback, sequencer clocking readback,
 graphics controller readback, attribute controller text mode state, font plane
@@ -117,6 +124,7 @@ Test coverage by area:
 | GUI mode | Framebuffer mode set, surface access, status bar, taskbar, wallpaper pixels, graphics mouse mode, text mode restore |
 | Buffering | Double buffer surface, dirty rectangle present, untouched pixels, full present, damaged region merge |
 | VGA restore | Buffer release, CRTC horizontal timing, CRTC vertical timing, sequencer clocking, graphics controller mode, attribute text mode, font plane byte, text buffer cell |
+| Network | e1000 presence, guest address, MAC, byte order, IPv4 checksum, header parse and reject, address parse and format, Ethernet parse, ARP cache and replies, UDP bind and delivery, socket lifecycle, ICMP answering, receive accounting |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
@@ -246,6 +254,8 @@ the shell over COM1. The following commands and properties are checked:
   ZFS through the shell.
 - `gui` enters the desktop session and `exit` typed inside the desktop returns
   to the shell with the VGA text console restored.
+- `netinfo`, `arp`, `ping` and `udp-echo` exercise the network stack, and
+  `udp-echo` is reachable from the host through a QEMU UDP host forward.
 - `postest` runs the POSIX descriptor, credential, signal, and timed wait
   program and reports its exit status.
 - `guitest2` renders font text into the framebuffer, queries the mouse, and
@@ -308,6 +318,10 @@ rebuilds first unless `--skip-build` is supplied.
 - POSIX signals, credentials, sessions, or a file-descriptor table.
 - Copy-on-write fork, demand paging, or a user-space heap.
 - Exec path lookup, argv/envp, auxiliary vectors, or dynamic linking.
+- TCP, DNS, DHCP, IPv6 and a POSIX socket ABI; the network milestone implements
+  ARP, IPv4, ICMP and UDP only.
+- Network isolation: QEMU user mode networking is used, so external reachability
+  beyond the virtual gateway and host forward is not exercised.
 - Mouse acceleration and wheel semantics; the automated GUI stage injects
   relative motion through the QEMU monitor, which reaches the guest through the
   same IRQ12 packet path as a physical mouse. QEMU sends one initial absolute
@@ -326,4 +340,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.6.0 test run.
+passing 0.7.0 test run.

@@ -1,5 +1,6 @@
 #include "ata.h"
 #include "boot.h"
+#include "e1000.h"
 #include "console.h"
 #include "gdt.h"
 #include "heap.h"
@@ -8,6 +9,7 @@
 #include "kernel.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "net.h"
 #include "lib.h"
 #include "pmm.h"
 #include "pic.h"
@@ -61,6 +63,17 @@ void kmain(struct boot_info *boot) {
         kprintf("ATA: primary master, %u sectors, model %s\n", ata_sector_count(), ata_model());
     } else {
         kprintf("ATA: no primary master device\n");
+    }
+    net_init();
+    if (net_ready()) {
+        char mac_text[24];
+        char ip_text[20];
+        net_format_mac(net_config_get()->mac, mac_text, sizeof(mac_text));
+        net_format_ip(net_config_get()->ip, ip_text, sizeof(ip_text));
+        kprintf("net: e1000 %s, mac %s, ip %s, link %s\n",
+                e1000_link_state(), mac_text, ip_text, e1000_link_state());
+    } else {
+        kprintf("net: no e1000 device\n");
     }
     process_init();
     sched_process_init();

@@ -12,6 +12,7 @@
 #include "process.h"
 #include "sched.h"
 #include "signal.h"
+#include "socket.h"
 #include "string.h"
 #include "thread.h"
 #include "timer.h"
@@ -46,6 +47,11 @@
 #define SYS_MOUSE 24
 #define SYS_GUI_ENTER 25
 #define SYS_GUI_EXIT 26
+#define SYS_SOCKET 27
+#define SYS_BIND 28
+#define SYS_SENDTO 29
+#define SYS_RECVFROM 30
+#define SYS_SOCKET_CLOSE 31
 
 static bool gui_enter_flag = false;
 static bool gui_exit_flag = false;
@@ -371,6 +377,77 @@ static u64 syscall_fb_text(struct registers *registers) {
     return 0;
 }
 
+static u64 syscall_socket(struct registers *registers) {
+    u64 descriptor = (u64)socket_create((u32)registers->rdi, (u32)registers->rsi,
+                                        (u32)registers->rdx);
+    if ((i64)descriptor < 0) {
+        return (u64)(i64)-1;
+    }
+    return descriptor;
+}
+
+static u64 syscall_bind(struct registers *registers) {
+    int descriptor = (int)registers->rdi;
+    u16 port = (u16)registers->rsi;
+    if (socket_bind(descriptor, 0, port) != 0) {
+        return (u64)(i64)-1;
+    }
+    return 0;
+}
+
+static u64 syscall_sendto(struct registers *registers) {
+    int descriptor = (int)registers->rdi;
+    u32 address = (u32)registers->rsi;
+    u16 port = (u16)registers->rdx;
+    u64 data_address = registers->r10;
+    u64 length = registers->r8;
+    if (length == 0 || length > 512 || !syscall_buffer_valid(data_address, length)) {
+        return (u64)(i64)-1;
+    }
+    u8 buffer[512];
+    memcpy(buffer, (const void *)(usize)data_address, (usize)length);
+    int sent = socket_sendto(descriptor, address, port, buffer, (u32)length);
+    if (sent < 0) {
+        return (u64)(i64)-1;
+    }
+    return (u64)sent;
+}
+
+static u64 syscall_recvfrom(struct registers *registers) {
+    int descriptor = (int)registers->rdi;
+    u64 buffer_address = registers->rsi;
+    u64 capacity = registers->rdx;
+    u32 timeout_ms = (u32)registers->r10;
+    u64 source_ip_address = registers->r8;
+    u64 source_port_address = registers->r9;
+    if (capacity == 0 || capacity > 512 || !syscall_buffer_valid(buffer_address, capacity)) {
+        return (u64)(i64)-1;
+    }
+    u8 buffer[512];
+    u32 source_ip = 0;
+    u16 source_port = 0;
+    int received = socket_recvfrom(descriptor, buffer, (u32)capacity, timeout_ms,
+                                   &source_ip, &source_port);
+    if (received < 0) {
+        return (u64)(i64)-1;
+    }
+    memcpy((void *)(usize)buffer_address, buffer, (usize)received);
+    if (source_ip_address != 0 && syscall_buffer_valid(source_ip_address, sizeof(u32))) {
+        memcpy((void *)(usize)source_ip_address, &source_ip, sizeof(u32));
+    }
+    if (source_port_address != 0 && syscall_buffer_valid(source_port_address, sizeof(u16))) {
+        memcpy((void *)(usize)source_port_address, &source_port, sizeof(u16));
+    }
+    return (u64)received;
+}
+
+static u64 syscall_socket_close(struct registers *registers) {
+    if (socket_close((int)registers->rdi) != 0) {
+        return (u64)(i64)-1;
+    }
+    return 0;
+}
+
 static u64 syscall_mouse(struct registers *registers) {
     u64 destination = registers->rdi;
     if (destination == 0 || !syscall_buffer_valid(destination, 16)) {
@@ -479,6 +556,21 @@ void syscall_dispatch(struct registers *registers) {
         case SYS_GUI_EXIT:
             gui_request_exit();
             registers->rax = 0;
+            break;
+        case SYS_SOCKET:
+            registers->rax = syscall_socket(registers);
+            break;
+        case SYS_BIND:
+            registers->rax = syscall_bind(registers);
+            break;
+        case SYS_SENDTO:
+            registers->rax = syscall_sendto(registers);
+            break;
+        case SYS_RECVFROM:
+            registers->rax = syscall_recvfrom(registers);
+            break;
+        case SYS_SOCKET_CLOSE:
+            registers->rax = syscall_socket_close(registers);
             break;
         default:
             registers->rax = (u64)-1;

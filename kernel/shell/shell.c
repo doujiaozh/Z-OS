@@ -1,7 +1,14 @@
 #include "shell.h"
 #include "ata.h"
 #include "console.h"
+#include "arp.h"
 #include "desktop.h"
+#include "e1000.h"
+#include "icmp.h"
+#include "ipv4.h"
+#include "net.h"
+#include "socket.h"
+#include "udp.h"
 #include "syscall.h"
 #include "fb.h"
 #include "font.h"
@@ -228,6 +235,10 @@ static void command_help(void) {
     kprintf("  gui                  enter the graphical desktop session\n");
     kprintf("  exit                 leave the graphical desktop session\n");
     kprintf("  mouse                report ps2 mouse state and packet counters\n");
+    kprintf("  netinfo              report e1000, mac, ip and protocol counters\n");
+    kprintf("  arp <ip>             resolve an ipv4 address to a mac address\n");
+    kprintf("  ping <ip>            send four icmp echo requests\n");
+    kprintf("  udp-echo <port>      bind a udp port and echo one datagram\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -835,6 +846,157 @@ static void gui_run_session(void) {
     kprintf("gui: exited desktop\n");
 }
 
+static u32 parse_decimal(const char *text, u32 fallback) {
+    if (text == NULL || text[0] == 0) {
+        return fallback;
+    }
+    u32 value = 0;
+    for (const char *cursor = text; *cursor != 0; cursor++) {
+        if (*cursor < '0' || *cursor > '9') {
+            return fallback;
+        }
+        value = value * 10 + (u32)(*cursor - '0');
+        if (value > 1000000) {
+            return fallback;
+        }
+    }
+    return value;
+}
+
+static void command_netinfo(void) {
+    const struct net_config *config = net_config_get();
+    if (!net_ready()) {
+        kprintf("net: no e1000 device\n");
+        return;
+    }
+    char mac_text[24];
+    char ip_text[20];
+    char gateway_text[20];
+    char mask_text[20];
+    net_format_mac(config->mac, mac_text, sizeof(mac_text));
+    net_format_ip(config->ip, ip_text, sizeof(ip_text));
+    net_format_ip(config->gateway, gateway_text, sizeof(gateway_text));
+    net_format_ip(config->netmask, mask_text, sizeof(mask_text));
+    kprintf("net: link %s\n", e1000_link_state());
+    kprintf("net: mac %s\n", mac_text);
+    kprintf("net: ip %s\n", ip_text);
+    kprintf("net: gateway %s mask %s\n", gateway_text, mask_text);
+    kprintf("net: rx %u frames, tx %u frames\n",
+            net_frames_received(), net_frames_sent());
+    kprintf("net: ipv4 rx %u, tx %u, checksum errors %u\n",
+            net_ipv4_received(), net_ipv4_sent(), ipv4_checksum_errors());
+    kprintf("net: arp entries %u, requests %u, replies %u\n",
+            arp_cache_count(), arp_requests_sent(), arp_replies_received());
+    kprintf("net: udp rx %u, tx %u\n", udp_datagrams_received(), udp_datagrams_sent());
+    const struct e1000_device *device = e1000_device_state();
+    kprintf("net: e1000 rx packets %u, tx packets %u, irq %u\n",
+            device->packets_received, device->packets_sent, device->irq);
+}
+
+static void command_arp(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: arp <ip>\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("arp: network is not ready\n");
+        return;
+    }
+    u32 address = net_parse_ip(arguments[1]);
+    if (address == 0) {
+        kprintf("arp: invalid address\n");
+        return;
+    }
+    u8 mac[6];
+    if (arp_resolve(address, mac, 2000) != 0) {
+        kprintf("arp: no reply from %s\n", arguments[1]);
+        return;
+    }
+    char mac_text[24];
+    net_format_mac(mac, mac_text, sizeof(mac_text));
+    kprintf("arp: %s is at %s\n", arguments[1], mac_text);
+}
+
+static void command_ping(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: ping <ip>\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("ping: network is not ready\n");
+        return;
+    }
+    u32 address = net_parse_ip(arguments[1]);
+    if (address == 0) {
+        kprintf("ping: invalid address\n");
+        return;
+    }
+    u32 count = argc >= 3 ? parse_decimal(arguments[2], 4) : 4;
+    if (count == 0 || count > 10) {
+        count = 4;
+    }
+    kprintf("ping: %s with 16 bytes of payload\n", arguments[1]);
+    u32 received = 0;
+    for (u32 index = 0; index < count; index++) {
+        u32 round_trip = 0;
+        if (icmp_ping(address, 800, &round_trip) == 0) {
+            received++;
+            kprintf("ping: reply from %s time=%u ms sequence=%u\n",
+                    arguments[1], round_trip, index + 1);
+        } else {
+            kprintf("ping: timeout sequence=%u\n", index + 1);
+        }
+        sched_sleep_ms(100);
+    }
+    kprintf("ping: %u/%u replies from %s\n", received, count, arguments[1]);
+}
+
+static void command_udp_echo(int argc, char *arguments[]) {
+    if (argc < 2) {
+        kprintf("usage: udp-echo <port> [timeout-ms]\n");
+        return;
+    }
+    if (!net_ready()) {
+        kprintf("udp-echo: network is not ready\n");
+        return;
+    }
+    u16 port = (u16)parse_decimal(arguments[1], 0);
+    if (port == 0) {
+        kprintf("udp-echo: invalid port\n");
+        return;
+    }
+    u32 timeout_ms = argc >= 3 ? parse_decimal(arguments[2], 4000) : 4000;
+    int descriptor = socket_create(SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    if (descriptor < 0 || socket_bind(descriptor, 0, port) != 0) {
+        kprintf("udp-echo: bind failed\n");
+        if (descriptor > 0) {
+            socket_close(descriptor);
+        }
+        return;
+    }
+    kprintf("udp-echo: listening on port %u\n", port);
+    u8 buffer[512];
+    u32 source_ip = 0;
+    u16 source_port = 0;
+    int received = socket_recvfrom(descriptor, buffer, sizeof(buffer), timeout_ms,
+                                   &source_ip, &source_port);
+    if (received < 0) {
+        kprintf("udp-echo: timeout\n");
+        socket_close(descriptor);
+        return;
+    }
+    char ip_text[20];
+    net_format_ip(source_ip, ip_text, sizeof(ip_text));
+    kprintf("udp-echo: received %d bytes from %s:%u\n", received, ip_text, source_port);
+    int sent = socket_sendto(descriptor, source_ip, source_port, buffer, (u32)received);
+    if (sent < 0) {
+        kprintf("udp-echo: reply failed\n");
+    } else {
+        kprintf("udp-echo: echoed %d bytes\n", sent);
+    }
+    socket_close(descriptor);
+}
+
 static void command_mouse(void) {
     struct mouse_state state;
     mouse_get_state(&state);
@@ -1181,6 +1343,14 @@ static void execute_command(int argc, char *arguments[]) {
         command_zsync();
     } else if (strcmp(command, "mouse") == 0) {
         command_mouse();
+    } else if (strcmp(command, "netinfo") == 0) {
+        command_netinfo();
+    } else if (strcmp(command, "arp") == 0) {
+        command_arp(argc, arguments);
+    } else if (strcmp(command, "ping") == 0) {
+        command_ping(argc, arguments);
+    } else if (strcmp(command, "udp-echo") == 0) {
+        command_udp_echo(argc, arguments);
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

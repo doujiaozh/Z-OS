@@ -9,15 +9,17 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.6.0 is the Storage and Desktop stage. It boots, manages memory, runs
+Z-OS 0.7.0 is the Network stage. It boots, manages memory, runs
 preemptive kernel threads, hosts a VFS, ATA storage and shell, schedules Ring 3
 ELF64 processes, implements POSIX primitives, and adds an ATA PIO block driver
 with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
 provides mouse events, a text-mode pointer, window frames with dragging and
 close buttons, and a modern desktop with status bar, taskbar, icons and hit
 tested interaction, plus a GUI session that returns to a fully restored VGA
-text console. It verifies itself under QEMU with 267 in-kernel checks plus
-cross-reboot storage replay, desktop, double buffering and VGA restore tests.
+text console. It also drives a PCI e1000 network adapter and implements ARP, IPv4, ICMP and
+UDP with socket system calls verified against QEMU user mode networking. It
+verifies itself under QEMU with 301 in-kernel checks plus cross-reboot storage
+replay, network round trips, desktop, double buffering and VGA restore tests.
 
 ## Phase 1 execution status
 
@@ -39,7 +41,8 @@ cross-reboot storage replay, desktop, double buffering and VGA restore tests.
 | Persistent block device and on-disk filesystem | Implemented and verified | v0.6.0-storage |
 | Modern desktop shell with mouse events and hit testing | Implemented and verified | v0.6.0-storage |
 | Graphical session switching back to VGA text mode | Implemented and verified | v0.6.0-storage |
-| Network stack, TCP/IP, and a socket API | Planned, next | v0.7.0-network |
+| Network stack, TCP/IP, and a socket API | Implemented for ARP, IPv4, ICMP, UDP | v0.7.0-network |
+| TCP, DNS, DHCP and a POSIX socket ABI | Planned, next | v0.8.0-tcp |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -49,7 +52,7 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.6.0 Desktop | Needed for general purpose |
+| Domain | 0.7.0 Network | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
@@ -65,7 +68,7 @@ claimed as complete.
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 267 boot tests, storage, desktop, buffering and VGA restore checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 301 boot tests, storage, network, desktop and buffering checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -99,16 +102,15 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v0.6.0-storage delivered the ATA PIO block driver, the persistent Z-OS
-filesystem with format, mount, file operations and a /disk VFS mount, the
-system-wide mouse event queue, the text-mode pointer overlay, window titles,
-close buttons, dragging and z-order composition, the desktop shell with status
-bar, taskbar, icons and hit testing, GUI session switching with a restored VGA
-text console, the gui_enter and gui_exit syscalls, an outlined graphical
-cursor, a full-screen back buffer with damage rectangle presentation, and a
-complete VGA mode 3 restore sequence that reloads the character generator font.
-The remaining items below move storage toward a real disk filesystem, the
-desktop toward a user-space compositor, and the system toward networking.
+v0.7.0-network delivered PCI enumeration, the e1000 driver with physical DMA
+rings, raw frame queues and interrupt plus polling reception, the ARP cache and
+resolution, IPv4 routing and checksums, ICMP echo request handling and ping,
+UDP port binding and datagram queues, socket descriptors with five new system
+calls, the netinfo, arp, ping and udp-echo shell commands, and a network
+verification stage that exercises real ARP, ICMP and UDP traffic through QEMU
+user mode networking. The remaining items below move networking toward TCP and
+a POSIX socket ABI, storage toward a real disk filesystem, and the desktop
+toward a user-space compositor.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -311,13 +313,13 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add a TCP/IP network stack with an e1000 driver and a socket API.
-2. Replace polled PIO with DMA, add partitions, journaling and checksums.
-3. Move the desktop to a user-space compositor client with damage tracking.
-4. Add sessions, process groups, job control and a complete POSIX ABI with libc.
-5. Unify kernel threads and user processes into one task model.
+1. Add TCP with reliable streams, then DNS and DHCP client support.
+2. Add a complete POSIX socket ABI with blocking and non-blocking modes.
+3. Replace polled ATA with DMA, add partitions, journaling and checksums.
+4. Move the desktop to a user-space compositor client with damage tracking.
+5. Add sessions, process groups, job control and a complete POSIX ABI with libc.
 6. Complete the hardening backlog: guard pages, VFS ownership, SMEP/SMAP, NX.
-7. Add ACPI table parsing and PCI enumeration.
+7. Add ACPI table parsing and multi-device PCI enumeration.
 
 Progress should be measured by verified tests and external use cases, not by
 the number of named features.
