@@ -1,6 +1,7 @@
 #include "heap.h"
 #include "io.h"
 #include "lib.h"
+#include "security.h"
 #include "pmm.h"
 #include "spinlock.h"
 #include "string.h"
@@ -8,6 +9,10 @@
 
 #define HEAP_BASE 0x60000000ULL
 #define HEAP_SIZE (8ULL * 1024 * 1024)
+#define HEAP_KASLR_STEP 0x00010000ULL
+#define HEAP_KASLR_MAX_OFFSET (4ULL * 1024 * 1024)
+static u64 heap_base_address = HEAP_BASE;
+static u64 heap_kaslr_slot_value = 0;
 #define HEAP_MAGIC 0x5A4F534845415042ULL
 #define HEAP_ALIGNMENT 16
 
@@ -50,20 +55,38 @@ static void split_block(struct heap_block *block, usize size) {
     block->size = size;
 }
 
+u64 heap_base(void) {
+    return heap_base_address;
+}
+
+u64 heap_kaslr_slot(void) {
+    return heap_kaslr_slot_value;
+}
+
+bool heap_kaslr_enabled(void) {
+    return heap_kaslr_slot_value != 0;
+}
+
 void heap_init(void) {
+    u64 slots = HEAP_KASLR_MAX_OFFSET / HEAP_KASLR_STEP;
+    u64 random = security_random();
+    heap_kaslr_slot_value = random % slots;
+    heap_base_address = HEAP_BASE + heap_kaslr_slot_value * HEAP_KASLR_STEP;
     for (u64 offset = 0; offset < HEAP_SIZE; offset += PAGE_SIZE) {
         u64 frame = pmm_alloc_frame();
         if (frame == 0) {
             panic("out of physical memory while building kernel heap");
         }
-        if (vmm_map_page(HEAP_BASE + offset, frame, PTE_PRESENT | PTE_WRITABLE) != 0) {
+        if (vmm_map_page(heap_base_address + offset, frame, PTE_PRESENT | PTE_WRITABLE) != 0) {
             panic("failed to map kernel heap page");
         }
     }
-    heap_first = (struct heap_block *)(usize)HEAP_BASE;
-    block_initialize(heap_first, HEAP_SIZE - sizeof(struct heap_block), NULL, NULL);
+    heap_first = (struct heap_block *)(usize)heap_base_address;
+    block_initialize(heap_first, HEAP_SIZE - (heap_kaslr_slot_value * HEAP_KASLR_STEP) -
+                     sizeof(struct heap_block), NULL, NULL);
     heap_allocation_count = 0;
-    kprintf("Heap: %llu MiB at %p\n", HEAP_SIZE / (1024 * 1024), (void *)HEAP_BASE);
+    kprintf("Heap: %llu MiB at %p (kaslr slot %llu)\n", HEAP_SIZE / (1024 * 1024),
+            (void *)heap_base_address, heap_kaslr_slot_value);
 }
 
 void *kmalloc(usize size) {
@@ -158,7 +181,7 @@ struct heap_stats heap_get_stats(void) {
     u64 flags;
     spin_lock_irqsave(&heap_lock, &flags);
     struct heap_stats stats = {0};
-    stats.total_bytes = HEAP_SIZE;
+    stats.total_bytes = HEAP_SIZE - (heap_kaslr_slot_value * HEAP_KASLR_STEP);
     struct heap_block *block = heap_first;
     while (block != NULL) {
         if (block->used) {

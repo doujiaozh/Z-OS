@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-0.9.0 Internet. It is deliberately conservative. The system is a development
+1.0.0 Platform. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -106,6 +106,15 @@ prototype and must not be used to protect sensitive data.
   bytes, validates the status line and only copies the declared body length.
 - Sockets record their owning process and are force closed when the owner exits,
   releasing UDP ports and TCP connections.
+- SMEP is enabled when the CPU advertises it, so the kernel cannot execute user
+  pages even if a stray indirect branch targets them.
+- SMAP is enabled when the CPU advertises it; user memory is only touched inside
+  AC scoped windows opened by the syscall and signal paths after address space
+  validation.
+- Heap layout is randomized per boot inside the reserved heap window using
+  timestamp entropy, so kernel object addresses are not fixed.
+- Select and non-blocking socket operations validate descriptor bits and cap
+  transfer sizes before touching buffers.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
   zero before user execution.
 - The boot image is deterministic and the build hash is recorded.
@@ -119,6 +128,19 @@ prototype and must not be used to protect sensitive data.
 Each process owns a private PML4 and user page tables, and user frames are not
 shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
+
+Platform hardening is not yet a security boundary:
+
+- The AC window used for user copies is coarse; a bug inside VFS or console
+  code running inside that window would bypass SMAP.
+- KASLR entropy is limited to a four megabyte heap window with 64 KiB
+  granularity and does not relocate the kernel image or page tables.
+- There are no guard pages, stack canaries, shadow stacks or KPTI; kernel stacks
+  are heap allocations with no unmapped guard.
+- Data pages are not NX enforced by the kernel linker or page attributes beyond
+  ELF segment flags; no W^X policy is applied to kernel mappings.
+- SMEP and SMAP depend on the CPU model; without them the kernel reports
+  unsupported and falls back to the unhardened behaviour.
 
 Internet surfaces are not yet a security boundary:
 
@@ -333,16 +355,18 @@ process reaping, and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. TCP hardening: SYN backlog limits and randomized initial sequence numbers
+1. Platform hardening: guard pages for kernel stacks, stack canaries, KPTI,
+   NX enforcement, W^X kernel mappings and full KASLR.
+2. TCP hardening: SYN backlog limits and randomized initial sequence numbers
    from an entropy source.
-2. DNS response validation by source address, cache keyed by server, and
+3. DNS response validation by source address, cache keyed by server, and
    negative caching only for authoritative failures.
-3. DHCP option validation policy and optional static configuration override.
-4. TLS style transport security, certificate validation and an HTTP client with
+4. DHCP option validation policy and optional static configuration override.
+5. TLS style transport security, certificate validation and an HTTP client with
    redirect and size policy.
-5. Network input validation hardening: ARP cache limits with aging, TTL
+6. Network input validation hardening: ARP cache limits with aging, TTL
    handling, fragment rejection policy and frame queue accounting.
-6. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
+7. ZFS checksums, atomic metadata updates and a repair tool, plus filesystem
    permissions and path validation.
 4. VFS owner and mode storage so credentials actually gate file access, plus
    a non-root default identity for spawned processes.

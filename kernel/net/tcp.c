@@ -780,3 +780,49 @@ u32 tcp_test_receive_sequence(int connection_id) {
 void tcp_test_set_transmit(bool enabled) {
     transmit_enabled = enabled;
 }
+
+bool tcp_can_receive(int connection_id) {
+    struct tcp_connection *connection = find_connection(connection_id);
+    if (connection == NULL) {
+        return false;
+    }
+    if (connection->state == TCP_STATE_LISTEN) {
+        return tcp_accept_pending(connection_id);
+    }
+    if (connection->receive_length > 0 || connection->fin_received) {
+        return true;
+    }
+    return connection->state == TCP_STATE_CLOSE_WAIT;
+}
+
+bool tcp_can_send(int connection_id) {
+    struct tcp_connection *connection = find_connection(connection_id);
+    if (connection == NULL) {
+        return false;
+    }
+    if (connection->state != TCP_STATE_ESTABLISHED && connection->state != TCP_STATE_CLOSE_WAIT) {
+        return false;
+    }
+    return connection->send_length < TCP_SEND_BUFFER;
+}
+
+bool tcp_accept_pending(int listen_id) {
+    struct tcp_connection *listener = find_connection(listen_id);
+    if (listener == NULL || listener->state != TCP_STATE_LISTEN) {
+        return false;
+    }
+    for (u32 index = 0; index < TCP_MAX_CONNECTIONS; index++) {
+        struct tcp_connection *connection = &connections[index];
+        if (connection->used && !connection->accepted &&
+            connection->state == TCP_STATE_ESTABLISHED &&
+            connection->local_port == listener->local_port) {
+            return true;
+        }
+    }
+    return false;
+}
+
+u32 tcp_receive_pending(int connection_id) {
+    struct tcp_connection *connection = find_connection(connection_id);
+    return connection == NULL ? 0 : connection->receive_length;
+}

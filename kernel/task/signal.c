@@ -3,6 +3,7 @@
 #include "io.h"
 #include "process.h"
 #include "string.h"
+#include "security.h"
 #include "vmm.h"
 
 #define SIGNAL_MASK_OPERATION_BLOCK 1
@@ -132,8 +133,10 @@ int signal_deliver(struct process *process, struct registers *frame) {
         }
         switched = true;
     }
+    security_stac();
     *(u64 *)(usize)context_address = state->trampoline;
     memcpy((void *)(usize)(context_address + 8), frame, sizeof(struct registers));
+    security_clac();
     if (switched) {
         write_cr3(active_pml4);
     }

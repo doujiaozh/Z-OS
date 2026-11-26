@@ -11,6 +11,7 @@
 #include "mouse.h"
 #include "process.h"
 #include "sched.h"
+#include "security.h"
 #include "signal.h"
 #include "dns.h"
 #include "socket.h"
@@ -59,6 +60,8 @@
 #define SYS_SEND 35
 #define SYS_DNS 36
 #define SYS_GET_TEST_PORT 37
+#define SYS_SELECT 38
+#define SYS_SET_NONBLOCKING 39
 
 static bool gui_enter_flag = false;
 static bool gui_exit_flag = false;
@@ -132,7 +135,9 @@ static bool syscall_copy_string(char *destination, u64 source, usize capacity) {
         if (!syscall_buffer_valid(source + index, 1)) {
             return false;
         }
+        security_stac();
         char character = *(const char *)(usize)(source + index);
+        security_clac();
         destination[index] = character;
         if (character == 0) {
             return true;
@@ -159,7 +164,9 @@ static u64 syscall_write(struct registers *registers) {
     if (length > 4096 || buffer == NULL || !syscall_buffer_valid((u64)buffer, length)) {
         return (u64)-1;
     }
+    security_stac();
     int result = fd_write(&process->fds, descriptor, buffer, length);
+    security_clac();
     return result < 0 ? (u64)-1 : (u64)result;
 }
 
@@ -177,7 +184,9 @@ static u64 syscall_read(struct registers *registers) {
     if (length > 4096 || buffer == NULL || !syscall_buffer_valid((u64)buffer, length)) {
         return (u64)-1;
     }
+    security_stac();
     int result = fd_read(&process->fds, descriptor, buffer, length);
+    security_clac();
     return result < 0 ? (u64)-1 : (u64)result;
 }
 
@@ -247,7 +256,9 @@ static u64 syscall_wait(struct registers *registers) {
         process->wait_deadline_ticks = 0;
         process->wait_target = 0;
         if (status_address != 0) {
+            security_stac();
             *(u64 *)(usize)status_address = status;
+            security_clac();
         }
         return reaped_pid;
     }
@@ -314,7 +325,10 @@ static u64 syscall_sigreturn(struct registers *registers) {
     if (context == 0 || !syscall_buffer_valid(context, SIGNAL_FRAME_SIZE)) {
         sched_exit_current(0x91);
     }
-    if (!signal_restore(registers, (const void *)(usize)context, SIGNAL_FRAME_SIZE)) {
+    security_stac();
+    bool restored = signal_restore(registers, (const void *)(usize)context, SIGNAL_FRAME_SIZE);
+    security_clac();
+    if (!restored) {
         sched_exit_current(0x92);
     }
     return registers->rax;
@@ -346,7 +360,9 @@ static u64 syscall_fb_info(struct registers *registers) {
     info.bits_per_pixel = mode.bits_per_pixel;
     info.format = mode.format;
     info.active = 1;
+    security_stac();
     memcpy((void *)(usize)destination, &info, sizeof(info));
+    security_clac();
     return 0;
 }
 
@@ -422,7 +438,9 @@ static u64 syscall_sendto(struct registers *registers) {
         return (u64)(i64)-1;
     }
     u8 buffer[512];
+    security_stac();
     memcpy(buffer, (const void *)(usize)data_address, (usize)length);
+    security_clac();
     int sent = socket_sendto(descriptor, address, port, buffer, (u32)length);
     if (sent < 0) {
         return (u64)(i64)-1;
@@ -448,6 +466,7 @@ static u64 syscall_recvfrom(struct registers *registers) {
     if (received < 0) {
         return (u64)(i64)-1;
     }
+    security_stac();
     memcpy((void *)(usize)buffer_address, buffer, (usize)received);
     if (source_ip_address != 0 && syscall_buffer_valid(source_ip_address, sizeof(u32))) {
         memcpy((void *)(usize)source_ip_address, &source_ip, sizeof(u32));
@@ -455,6 +474,7 @@ static u64 syscall_recvfrom(struct registers *registers) {
     if (source_port_address != 0 && syscall_buffer_valid(source_port_address, sizeof(u16))) {
         memcpy((void *)(usize)source_port_address, &source_port, sizeof(u16));
     }
+    security_clac();
     return (u64)received;
 }
 
@@ -493,7 +513,9 @@ static u64 syscall_recv(struct registers *registers) {
     if (received < 0) {
         return (u64)(i64)-1;
     }
+    security_stac();
     memcpy((void *)(usize)buffer_address, buffer, (usize)received);
+    security_clac();
     return (u64)received;
 }
 
@@ -504,7 +526,9 @@ static u64 syscall_send(struct registers *registers) {
         return (u64)(i64)-1;
     }
     u8 buffer[2048];
+    security_stac();
     memcpy(buffer, (const void *)(usize)buffer_address, (usize)length);
+    security_clac();
     int sent = socket_send((int)registers->rdi, buffer, (u32)length);
     if (sent < 0) {
         return (u64)(i64)-1;
@@ -522,9 +546,43 @@ static u64 syscall_dns(struct registers *registers) {
         return (u64)(i64)-1;
     }
     if (registers->rsi != 0 && syscall_buffer_valid(registers->rsi, sizeof(u32))) {
+        security_stac();
         memcpy((void *)(usize)registers->rsi, &address, sizeof(u32));
+        security_clac();
     }
     return (u64)address;
+}
+
+static u64 syscall_select(struct registers *registers) {
+    u32 read_mask = (u32)registers->rdi;
+    u32 write_mask = (u32)registers->rsi;
+    u32 timeout_ms = (u32)registers->rdx;
+    u64 ready_read_address = registers->r10;
+    u64 ready_write_address = registers->r8;
+    u32 ready_read = 0;
+    u32 ready_write = 0;
+    int result = socket_select(read_mask, write_mask, timeout_ms, &ready_read, &ready_write);
+    if (result < 0) {
+        return (u64)(i64)-1;
+    }
+    if (ready_read_address != 0 && syscall_buffer_valid(ready_read_address, sizeof(u32))) {
+        security_stac();
+        memcpy((void *)(usize)ready_read_address, &ready_read, sizeof(u32));
+        security_clac();
+    }
+    if (ready_write_address != 0 && syscall_buffer_valid(ready_write_address, sizeof(u32))) {
+        security_stac();
+        memcpy((void *)(usize)ready_write_address, &ready_write, sizeof(u32));
+        security_clac();
+    }
+    return (u64)result;
+}
+
+static u64 syscall_set_nonblocking(struct registers *registers) {
+    if (socket_set_nonblocking((int)registers->rdi, registers->rsi != 0) != 0) {
+        return (u64)(i64)-1;
+    }
+    return 0;
 }
 
 static u64 syscall_mouse(struct registers *registers) {
@@ -534,11 +592,13 @@ static u64 syscall_mouse(struct registers *registers) {
     }
     struct mouse_state state;
     mouse_get_state(&state);
+    security_stac();
     i32 *target = (i32 *)(usize)destination;
     target[0] = state.x;
     target[1] = state.y;
     ((u32 *)(usize)destination)[2] = state.buttons;
     ((u32 *)(usize)destination)[3] = state.initialized ? 1U : 0U;
+    security_clac();
     return 0;
 }
 
@@ -668,6 +728,12 @@ void syscall_dispatch(struct registers *registers) {
             break;
         case SYS_GET_TEST_PORT:
             registers->rax = (u64)test_tcp_port;
+            break;
+        case SYS_SELECT:
+            registers->rax = syscall_select(registers);
+            break;
+        case SYS_SET_NONBLOCKING:
+            registers->rax = syscall_set_nonblocking(registers);
             break;
         default:
             registers->rax = (u64)-1;

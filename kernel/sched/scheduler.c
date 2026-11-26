@@ -1,3 +1,4 @@
+#include "task.h"
 #include "thread.h"
 #include "gdt.h"
 #include "heap.h"
@@ -8,6 +9,7 @@
 #include "timer.h"
 
 struct thread {
+    struct task_base task;
     u64 rsp;
     u64 stack_base;
     u64 stack_top;

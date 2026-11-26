@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 0.9.0 implementation as it exists in this
+This document describes the Z-OS 1.0.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 0.9.0:
+Non-goals for 1.0.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -38,6 +38,7 @@ Non-goals for 0.9.0:
 | Storage | ATA primary channel polled PIO at 0x1F0, control 0x3F6 |
 | Network | PCI e1000 82540EM, MMIO BAR, RX and TX descriptor rings, IRQ line from PCI config |
 | Transport | TCP control blocks, delayed acknowledgements not implemented, retransmission timer from network polling |
+| Hardening | SMEP, SMAP, AC scoped user copies, heap KASLR slot, NX via page table NX bit not yet enabled |
 | Internet | DHCP client, DNS cache with negative entries, HTTP 1.0 GET client, socket process ownership |
 | Console | VGA text mode at 0xB8000 plus serial mirror |
 | Physical memory cap | 1 GiB, the region covered by boot identity mappings |
@@ -593,6 +594,9 @@ Syscall ABI:
 | 34 | recv | RDI=fd, RSI=buffer, RDX=capacity, R10=timeout | bytes or -1 |
 | 35 | send | RDI=fd, RSI=buffer, RDX=length | bytes or -1 |
 | 36 | dns | RDI=name, RSI=address out | address or -1 |
+| 37 | get_test_port | none | configured user network test port |
+| 38 | select | RDI=read mask, RSI=write mask, RDX=timeout, R10=ready read out, R8=ready write out | ready count or -1 |
+| 39 | set_nonblocking | RDI=descriptor, RSI=enable | 0 or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -976,6 +980,68 @@ clears the entries. A ring 3 process that leaks sockets therefore releases its
 ports and connections on exit, which the internet verification stage asserts by
 checking that the tables are empty and that the leaked listening port can be
 bound again immediately.
+
+## Security hardening
+
+`kernel/cpu/security.c` turns on hardware supervisor protections when the CPU
+reports them through CPUID leaf 7: the supervisor mode execution prevention bit
+and the supervisor mode access prevention bit are set in CR4. The kernel prints
+the resulting CR4 value and exposes the support and activation state.
+
+Supervisor mode access prevention makes the kernel fault when it touches user
+pages without setting the AC flag, so every syscall path that reads or writes a
+user pointer opens a narrow AC window with `security_stac` and closes it with
+`security_clac`: string copies, file reads and writes, signal frame saving and
+restoring, wait status stores, framebuffer info and text, mouse state, DNS
+address results, select result masks, and socket send and receive buffers.
+Signal delivery writes the saved frame under the same window. The window is
+coarse: the kernel keeps AC set while the copied buffer is processed by VFS or
+console code, which is acceptable for a first hardening step but should be
+narrowed to the actual copy in future work.
+
+Heap address space layout randomization is implemented in `kernel/mm/heap.c`.
+The heap keeps its reserved eight megabyte window at 0x60000000 because process
+address spaces share those page directory entries, but the first heap block is
+placed at a random 64 KiB aligned slot inside the first four megabytes using
+entropy from the CPU timestamp counter mixed by `security_random`. Every kernel
+object allocated from the heap, including thread stacks, process control blocks
+and DMA descriptors, therefore lands at a runtime dependent offset. The kernel
+text and the boot page tables remain at fixed addresses because the flat loader
+cannot relocate the image.
+
+## Unified task base
+
+`kernel/task/task.c` introduces a shared task descriptor embedded at the front
+of both kernel threads and user processes. It records kind, identifier,
+scheduling state, quantum and wake tick, provides shared state and kind names,
+and counts threads and processes through one interface. Kernel threads and user
+processes still have separate scheduler paths, but the descriptor, accounting
+and reporting layer is unified and is the base for a future single scheduler.
+
+## POSIX style sockets
+
+`kernel/net/socket.c` adds descriptor flags and polling:
+
+- `socket_set_nonblocking` marks a descriptor non-blocking. Receive, send and
+  accept then return `-EAGAIN` when the operation would block, and the
+  non-blocking state is visible through `socket_is_nonblocking`.
+- Readiness checks ask UDP sockets for queued datagrams and TCP control blocks
+  for buffered data, end of stream, established state and send buffer space.
+- `socket_select` takes read and write descriptor bit masks, polls readiness
+  until a match or the timeout, and returns the ready masks. The kernel system
+  call uses a 32 bit descriptor bitmask instead of the historical fd_set layout;
+  the user C library wraps it as `net_select`.
+
+System calls 38 and 39 expose select and non-blocking control. User programs
+link against `user/libc.h`, which provides `net_socket`, `net_bind`,
+`net_connect`, `net_send`, `net_recv`, `net_sendto`, `net_recvfrom`,
+`net_select`, `net_nonblocking` and `net_close` over the syscall wrappers.
+
+The ring 3 `wget` tool uses the library to open a TCP connection to the
+configured test host, send a HTTP/1.0 GET request, read the response, locate the
+header terminator, and write the body to `/wget.out` through the file system
+calls. The shell command `wget <port>` creates the output file, copies the port
+into the kernel test configuration, runs the program and reports its status.
 
 ## Console and shell
 

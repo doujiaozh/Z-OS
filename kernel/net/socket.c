@@ -16,6 +16,7 @@ struct socket_record {
     u32 bound_port;
     u32 remote_address;
     u16 remote_port;
+    bool nonblocking;
 };
 
 static struct socket_record table[SOCKET_MAX];
@@ -172,10 +173,16 @@ int socket_recvfrom(int descriptor, void *buffer, u32 capacity, u32 timeout_ms,
         if (source_port != NULL) {
             *source_port = record->remote_port;
         }
+        if (record->nonblocking && !tcp_can_receive(record->tcp_index)) {
+            return -SOCKET_EAGAIN;
+        }
         return tcp_recv(record->tcp_index, buffer, capacity, timeout_ms);
     }
     if (record->udp_index < 0) {
         return -1;
+    }
+    if (record->nonblocking && udp_socket_queued((u32)record->udp_index) == 0) {
+        return -SOCKET_EAGAIN;
     }
     return udp_recv((u32)record->udp_index, buffer, capacity, timeout_ms, source_ip, source_port);
 }
@@ -250,6 +257,9 @@ int socket_accept(int descriptor, u32 timeout_ms) {
     if (record->type != SOCKET_SOCK_STREAM || record->tcp_index < 0) {
         return -1;
     }
+    if (record->nonblocking && !tcp_accept_pending(record->tcp_index)) {
+        return -SOCKET_EAGAIN;
+    }
     int accepted = tcp_accept(record->tcp_index, timeout_ms);
     if (accepted < 0) {
         return -1;
@@ -279,9 +289,96 @@ int socket_send(int descriptor, const void *data, u32 length) {
     if (record->type != SOCKET_SOCK_STREAM || record->tcp_index < 0) {
         return -1;
     }
+    if (record->nonblocking && !tcp_can_send(record->tcp_index)) {
+        return -SOCKET_EAGAIN;
+    }
     return tcp_send(record->tcp_index, data, length);
 }
 
 int socket_recv(int descriptor, void *buffer, u32 capacity, u32 timeout_ms) {
     return socket_recvfrom(descriptor, buffer, capacity, timeout_ms, NULL, NULL);
+}
+
+int socket_set_nonblocking(int descriptor, bool enabled) {
+    if (!socket_valid(descriptor)) {
+        return -1;
+    }
+    table[descriptor - 1].nonblocking = enabled;
+    return 0;
+}
+
+bool socket_is_nonblocking(int descriptor) {
+    if (!socket_valid(descriptor)) {
+        return false;
+    }
+    return table[descriptor - 1].nonblocking;
+}
+
+bool socket_read_ready(int descriptor) {
+    if (!socket_valid(descriptor)) {
+        return false;
+    }
+    struct socket_record *record = &table[descriptor - 1];
+    if (record->type == SOCKET_SOCK_STREAM) {
+        if (record->tcp_index < 0) {
+            return false;
+        }
+        return tcp_can_receive(record->tcp_index);
+    }
+    if (record->udp_index < 0) {
+        return false;
+    }
+    return udp_socket_queued((u32)record->udp_index) > 0;
+}
+
+bool socket_write_ready(int descriptor) {
+    if (!socket_valid(descriptor)) {
+        return false;
+    }
+    struct socket_record *record = &table[descriptor - 1];
+    if (record->type == SOCKET_SOCK_STREAM) {
+        if (record->tcp_index < 0) {
+            return false;
+        }
+        return tcp_can_send(record->tcp_index);
+    }
+    return record->udp_index >= 0;
+}
+
+u32 socket_select(u32 read_mask, u32 write_mask, u32 timeout_ms,
+                  u32 *ready_read, u32 *ready_write) {
+    u32 iterations = timeout_ms / 10 + 1;
+    for (u32 elapsed = 0; elapsed < iterations; elapsed++) {
+        u32 readable = 0;
+        u32 writable = 0;
+        for (u32 index = 1; index <= SOCKET_MAX; index++) {
+            u32 bit = 1U << index;
+            if ((read_mask & bit) != 0 && socket_read_ready((int)index)) {
+                readable |= bit;
+            }
+            if ((write_mask & bit) != 0 && socket_write_ready((int)index)) {
+                writable |= bit;
+            }
+        }
+        if (readable != 0 || writable != 0) {
+            if (ready_read != NULL) {
+                *ready_read = readable;
+            }
+            if (ready_write != NULL) {
+                *ready_write = writable;
+            }
+            return (int)(((readable != 0) ? 1 : 0) + ((writable != 0) ? 1 : 0));
+        }
+        if (elapsed + 1 >= iterations) {
+            break;
+        }
+        net_delay_ms(10);
+    }
+    if (ready_read != NULL) {
+        *ready_read = 0;
+    }
+    if (ready_write != NULL) {
+        *ready_write = 0;
+    }
+    return 0;
 }

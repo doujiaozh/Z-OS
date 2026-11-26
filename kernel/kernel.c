@@ -16,6 +16,7 @@
 #include "process.h"
 #include "rtc.h"
 #include "sched.h"
+#include "security.h"
 #include "serial.h"
 #include "shell.h"
 #include "string.h"
@@ -49,6 +50,7 @@ void kmain(struct boot_info *boot) {
         panic("long mode state is invalid");
     }
     kprintf("Long mode: EFER.LME verified, CR4.PAE verified\n");
+    security_init();
 
     gdt_init();
     interrupts_init();

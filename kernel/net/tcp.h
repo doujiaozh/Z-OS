@@ -72,5 +72,9 @@ u32 tcp_test_send_sequence(int connection_id);
 u32 tcp_test_receive_sequence(int connection_id);
 void tcp_test_set_transmit(bool enabled);
 const char *tcp_state_name(u32 state);
+bool tcp_can_receive(int connection_id);
+bool tcp_can_send(int connection_id);
+bool tcp_accept_pending(int listen_id);
+u32 tcp_receive_pending(int connection_id);
 
 #endif

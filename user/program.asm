@@ -15,6 +15,8 @@ global user_guitest2_start
 global user_guitest2_end
 global user_nettest2_start
 global user_nettest2_end
+global user_wget_start
+global user_wget_end
 
 user_program_start:
     incbin "user_init.elf"
@@ -43,3 +45,7 @@ user_guitest2_end:
 user_nettest2_start:
     incbin "user_nettest2.elf"
 user_nettest2_end:
+
+user_wget_start:
+    incbin "user_wget.elf"
+user_wget_end:

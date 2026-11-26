@@ -5,6 +5,8 @@
 
 #define SOCKET_MAX 8
 #define SOCKET_AF_INET 2
+#define SOCKET_EAGAIN 11
+#define SOCKET_EINVAL 22
 #define SOCKET_SOCK_STREAM 1
 #define SOCKET_SOCK_DGRAM 2
 
@@ -27,5 +29,11 @@ int socket_create_for_owner(u32 owner, u32 domain, u32 type, u32 protocol);
 u32 socket_owner(int descriptor);
 void socket_cleanup_process(u32 owner);
 u32 socket_owner_count(u32 owner);
+int socket_set_nonblocking(int descriptor, bool enabled);
+bool socket_is_nonblocking(int descriptor);
+bool socket_read_ready(int descriptor);
+bool socket_write_ready(int descriptor);
+u32 socket_select(u32 read_mask, u32 write_mask, u32 timeout_ms,
+                  u32 *ready_read, u32 *ready_write);
 
 #endif

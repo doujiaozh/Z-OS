@@ -17,5 +17,7 @@ extern u8 user_guitest2_start[];
 extern u8 user_guitest2_end[];
 extern u8 user_nettest2_start[];
 extern u8 user_nettest2_end[];
+extern u8 user_wget_start[];
+extern u8 user_wget_end[];
 
 #endif

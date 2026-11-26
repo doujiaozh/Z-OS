@@ -28,6 +28,8 @@ static struct process *allocate_process(const char *name, u64 parent_pid) {
             process_table[index].parent_pid = parent_pid;
             process_table[index].state = PROCESS_UNUSED;
             process_table[index].created_ticks = timer_ticks();
+            task_base_init(&process_table[index].task, TASK_KIND_PROCESS,
+                           (u32)process_table[index].pid);
             process_table[index].quantum = PROCESS_QUANTUM_TICKS;
             fd_table_init(&process_table[index].fds);
             cred_init_root(&process_table[index].cred);
@@ -158,6 +160,7 @@ static void process_reset_frame(struct registers *frame, u64 entry, u64 user_sta
 
 void process_init(void) {
     memset(process_table, 0, sizeof(process_table));
+    task_model_init();
     drain_ready_queue();
     waitq_init();
     current_process = NULL;

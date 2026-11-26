@@ -12,6 +12,9 @@ struct heap_stats {
 };
 
 void heap_init(void);
+u64 heap_base(void);
+u64 heap_kaslr_slot(void);
+bool heap_kaslr_enabled(void);
 void *kmalloc(usize size);
 void *kzalloc(usize size);
 void *krealloc(void *pointer, usize size);

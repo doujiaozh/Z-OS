@@ -28,6 +28,7 @@
 #include "power.h"
 #include "process.h"
 #include "sched.h"
+#include "security.h"
 #include "signal.h"
 #include "socket.h"
 #include "tcp.h"
@@ -724,7 +725,9 @@ static void test_signals(void)
         u64 trampoline = 0;
         u64 active_pml4 = vmm_pml4_phys();
         if (vmm_switch_address_space(&process->space) == 0) {
+            security_stac();
             trampoline = *(u64 *)(usize)frame.rsp;
+            security_clac();
             write_cr3(active_pml4);
         }
         check(trampoline == 0x40000020ULL, "signal frame stores the user sigreturn trampoline");
@@ -1745,6 +1748,70 @@ static void test_internet(void)
     socket_cleanup_process(999);
     check(socket_owner_count(999) == 0, "process cleanup ignores unknown owners");
 }
+static void test_platform(void)
+{
+    check(security_smep_supported() == security_smep_active(),
+          "smep activation matches cpu capability");
+    check(security_smap_supported() == security_smap_active(),
+          "smap activation matches cpu capability");
+    check((read_cr4() & SECURITY_CR4_SMEP) != 0 || !security_smep_supported(),
+          "cr4 smep bit reflects the cpu capability");
+    check((read_cr4() & SECURITY_CR4_SMAP) != 0 || !security_smap_supported(),
+          "cr4 smap bit reflects the cpu capability");
+    check(heap_kaslr_enabled(), "heap kaslr is enabled at boot");
+    check(heap_kaslr_slot() < 64, "heap kaslr slot stays inside its bounds");
+    check(heap_base() >= 0x60000000ULL && heap_base() < 0x60400000ULL,
+          "heap base stays inside the reserved randomisation window");
+    check(heap_base() == 0x60000000ULL + heap_kaslr_slot() * 0x10000ULL,
+          "heap base matches the selected kaslr slot");
+    struct task_base thread_task;
+    struct task_base process_task;
+    task_model_init();
+    task_base_init(&thread_task, TASK_KIND_THREAD, 7);
+    check(task_base_is_thread(&thread_task) && thread_task.state == TASK_STATE_READY &&
+          thread_task.quantum == 1, "task base initialises thread descriptors");
+    task_base_init(&process_task, TASK_KIND_PROCESS, 9);
+    check(task_base_is_process(&process_task) && task_base_threads() == 1 &&
+          task_base_processes() == 1, "task base counts threads and processes");
+    check(task_base_total() == 2 && task_base_threads() == 1, "task base reports unified totals");
+    task_base_set_state(&thread_task, TASK_STATE_BLOCKED);
+    task_base_set_quantum(&thread_task, 5);
+    check(thread_task.state == TASK_STATE_BLOCKED && thread_task.quantum == 5 &&
+          strcmp(task_state_name(TASK_STATE_BLOCKED), "blocked") == 0,
+          "task base tracks state and quantum");
+    check(strcmp(task_kind_name(TASK_KIND_PROCESS), "process") == 0,
+          "task base names process descriptors");
+    socket_init();
+    int udp_descriptor = socket_create_for_owner(900, SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(udp_descriptor > 0 && socket_bind(udp_descriptor, 0, 4950) == 0,
+          "select test socket binds a port");
+    u32 ready_read = 0;
+    u32 ready_write = 0;
+    check(socket_select(1U << udp_descriptor, 0, 50, &ready_read, &ready_write) == 0 &&
+          ready_read == 0, "select times out on an idle socket");
+    check(udp_inject_datagram(4950, NET_IPV4(10, 0, 2, 2), 8000, "sel", 3) == 0,
+          "select test queues a datagram");
+    check(socket_select(1U << udp_descriptor, 0, 100, &ready_read, &ready_write) > 0 &&
+          (ready_read & (1U << udp_descriptor)) != 0,
+          "select reports readable sockets");
+    check(socket_write_ready(udp_descriptor), "udp sockets report writable");
+    check(socket_set_nonblocking(udp_descriptor, true) == 0 &&
+          socket_is_nonblocking(udp_descriptor), "nonblocking mode can be enabled");
+    char datagram[16];
+    memset(datagram, 0, sizeof(datagram));
+    check(socket_recvfrom(udp_descriptor, datagram, sizeof(datagram), 0, NULL, NULL) == 3 &&
+          memcmp(datagram, "sel", 3) == 0, "nonblocking receive returns queued data");
+    check(socket_recvfrom(udp_descriptor, datagram, sizeof(datagram), 0, NULL, NULL) ==
+          -SOCKET_EAGAIN, "nonblocking receive reports eagain when empty");
+    socket_set_nonblocking(udp_descriptor, false);
+    check(socket_select(0, 1U << udp_descriptor, 20, &ready_read, &ready_write) >= 0 &&
+          (ready_write & (1U << udp_descriptor)) != 0, "select reports writable sockets");
+    check(socket_select(0xFFFFFFFFU, 0, 10, &ready_read, &ready_write) >= 0,
+          "select ignores descriptor bits outside the table");
+    check(!tcp_accept_pending(-1), "tcp accept readiness rejects invalid identifiers");
+    socket_cleanup_process(900);
+    check(!socket_valid(udp_descriptor), "select test socket is reclaimed");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1780,6 +1847,7 @@ void selftest_thread(void *argument)
     test_network();
     test_tcp();
     test_internet();
+    test_platform();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

@@ -9,19 +9,19 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 0.9.0 is the Internet stage. It boots, manages memory, runs
+Z-OS 1.0.0 is the Platform stage. It boots, manages memory, runs
 preemptive kernel threads, hosts a VFS, ATA storage and shell, schedules Ring 3
 ELF64 processes, implements POSIX primitives, and adds an ATA PIO block driver
 with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
 provides mouse events, a text-mode pointer, window frames with dragging and
 close buttons, and a modern desktop with status bar, taskbar, icons and hit
 tested interaction, plus a GUI session that returns to a fully restored VGA
-text console. It also drives a PCI e1000 network adapter with ARP, IPv4, ICMP, UDP, a TCP
-transport, a DHCP client, a cached DNS resolver, a minimal HTTP client and
-per-process socket ownership, verified against host services through QEMU user
-mode networking. It verifies itself under QEMU with 354 in-kernel checks plus
-cross-reboot storage replay, network round trips, TCP, DNS, DHCP, HTTP and
-socket cleanup exchanges, desktop, double buffering and VGA restore tests.
+text console. It also drives a PCI e1000 network adapter with ARP, IPv4, ICMP, UDP, TCP,
+DHCP, cached DNS, HTTP, per-process socket ownership, POSIX style select and
+non-blocking sockets, enables SMEP and SMAP, randomizes the heap layout, and
+ships a C library network interface with a user space HTTP download tool. It
+verifies itself under QEMU with 379 in-kernel checks plus storage replay,
+network, TCP, internet, platform, desktop, buffering and VGA restore tests.
 
 ## Phase 1 execution status
 
@@ -46,7 +46,9 @@ socket cleanup exchanges, desktop, double buffering and VGA restore tests.
 | Network stack, TCP/IP, and a socket API | Implemented for ARP, IPv4, ICMP, UDP | v0.7.0-network |
 | TCP with handshake, window, retransmission and DNS client | Implemented and verified | v0.8.0-tcp |
 | DHCP client, cached DNS, HTTP client, socket ownership | Implemented and verified | v0.9.0-internet |
-| POSIX socket ABI, TLS style transport, user space network tools | Planned, next | v1.0.0-platform |
+| POSIX select, non-blocking sockets, libc network API, user wget | Implemented and verified | v1.0.0-platform |
+| SMEP, SMAP and heap KASLR | Implemented and verified | v1.0.0-platform |
+| Guard pages, stack canaries, KPTI, full KASLR, TLS | Planned, next | v1.1.0-hardening |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -56,7 +58,7 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 0.9.0 Internet | Needed for general purpose |
+| Domain | 1.0.0 Platform | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
@@ -72,7 +74,7 @@ claimed as complete.
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 354 boot tests, storage, network, tcp, internet, desktop checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 379 boot tests, storage, network, tcp, internet, platform, desktop checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -106,16 +108,16 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v0.9.0-internet delivered the DHCP client with broadcast discover, offer
-parsing, request and lease application, the DNS cache with positive and
-negative entries, TTL expiry and hit accounting, the HTTP/1.0 GET client with
-status and header parsing, socket process ownership with forced cleanup on
-process exit, the dhcp, http, dnscache and sockinfo shell commands, the extended
-ring 3 nettest2 program that leaks sockets to prove cleanup, and an internet
-verification stage covering DHCP leases, cached DNS, HTTP page bodies and
-socket reclamation. The remaining items below move networking toward a POSIX
-socket ABI and transport security, storage toward a real disk filesystem, and
-the desktop toward a user-space compositor.
+v1.0.0-platform delivered SMEP and SMAP enabling with AC scoped user memory
+copies, heap address space layout randomization inside the shared heap window,
+a unified task descriptor shared by kernel threads and user processes, POSIX
+style select and non-blocking socket semantics with readiness polling, a user C
+library network interface, the ring 3 wget tool that saves a HTTP body through
+the file system, the platforminfo and wget shell commands, and a platform
+verification stage that asserts the security flags, KASLR, select readiness and
+the user space download. The remaining items below move hardening toward guard
+pages, stack canaries, full KASLR and KPTI, networking toward TLS, storage
+toward a real disk filesystem, and the desktop toward a user-space compositor.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -318,8 +320,8 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add a complete POSIX socket ABI with select, non-blocking modes and socket
-   options, plus user space network tools.
+1. Add comprehensive hardening: guard pages, stack canaries, KPTI, full kernel
+   and user space KASLR, and NX enforcement on data pages.
 2. Add TLS style transport security and a certificate store.
 3. Replace polled ATA with DMA, add partitions, journaling and checksums.
 4. Move the desktop to a user-space compositor client with damage tracking.

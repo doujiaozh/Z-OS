@@ -4,6 +4,7 @@
 #include "cred.h"
 #include "fd.h"
 #include "signal.h"
+#include "task.h"
 #include "types.h"
 #include "vmm.h"
 
@@ -30,6 +31,7 @@ enum process_state {
 };
 
 struct process {
+    struct task_base task;
     bool used;
     u64 pid;
     u64 parent_pid;

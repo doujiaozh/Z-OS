@@ -35,5 +35,6 @@ u32 udp_datagrams_sent(void);
 u32 udp_datagrams_received(void);
 u32 udp_datagrams_dropped(void);
 struct udp_socket_state udp_socket_info(u32 index);
+u32 udp_socket_queued(u32 index);
 
 #endif

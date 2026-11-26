@@ -237,3 +237,10 @@ u32 udp_datagrams_received(void) {
 u32 udp_datagrams_dropped(void) {
     return datagrams_dropped;
 }
+
+u32 udp_socket_queued(u32 index) {
+    if (index >= UDP_MAX_SOCKETS || !sockets[index].used) {
+        return 0;
+    }
+    return sockets[index].count;
+}

@@ -4,8 +4,8 @@
 #include "types.h"
 
 #define Z_OS_NAME "Z-OS"
-#define Z_OS_VERSION "0.9.0"
-#define Z_OS_CODENAME "Internet"
+#define Z_OS_VERSION "1.0.0"
+#define Z_OS_CODENAME "Platform"
 
 #define DISPLAY_MAX_DEVICES 8
 #define FRAMEBUFFER_FORMAT_UNKNOWN 0

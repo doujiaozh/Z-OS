@@ -6,6 +6,8 @@
 #include "dhcp.h"
 #include "dns.h"
 #include "http.h"
+#include "security.h"
+#include "task.h"
 #include "e1000.h"
 #include "icmp.h"
 #include "ipv4.h"
@@ -253,6 +255,8 @@ static void command_help(void) {
     kprintf("  http get <url>       fetch a web page with an http 1.0 get request\n");
     kprintf("  dnscache             report the dns cache contents and counters\n");
     kprintf("  sockinfo             report socket and transport table usage\n");
+    kprintf("  platforminfo         report security, kaslr and task model state\n");
+    kprintf("  wget [port]          run the ring 3 http download tool\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -1244,6 +1248,43 @@ static void command_sockinfo(void) {
             http_requests_sent(), http_requests_completed(), http_failures());
 }
 
+static void command_platforminfo(void) {
+    kprintf("security smep: %s smap: %s\n",
+            security_smep_active() ? "on" : (security_smep_supported() ? "failed" : "unsupported"),
+            security_smap_active() ? "on" : (security_smap_supported() ? "failed" : "unsupported"));
+    kprintf("kaslr enabled: %s slot: %u heap: %p\n",
+            heap_kaslr_enabled() ? "yes" : "no", (u32)heap_kaslr_slot(), (void *)heap_base());
+    kprintf("tasks: %u threads: %u processes: %u\n",
+            task_base_total(), task_base_threads(), task_base_processes());
+    kprintf("sockets: %u udp: %u tcp: %u\n",
+            socket_count(), udp_socket_count(), tcp_connection_count());
+}
+
+static void command_wget(int argc, char *arguments[]) {
+    if (argc >= 2) {
+        u32 port = parse_decimal(arguments[1], 0);
+        if (port > 0 && port < 65534) {
+            syscall_set_test_port(port);
+        }
+    }
+    struct vfs_node *root = vfs_root();
+    struct vfs_node *existing = vfs_lookup(root, "/wget.out");
+    if (existing != NULL) {
+        vfs_remove(root, "/wget.out");
+    }
+    if (vfs_create(root, "/wget.out") != VFS_OK && vfs_create(root, "/wget.out") != VFS_ERROR_EXISTS) {
+        kprintf("wget: could not create the output file\n");
+        return;
+    }
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("wget", user_wget_start, user_wget_end, &status);
+    if (pid == 0) {
+        kprintf("wget: program failed to run\n");
+        return;
+    }
+    kprintf("wget: exit status %llu\n", status);
+}
+
 static void command_mouse(void) {
     struct mouse_state state;
     mouse_get_state(&state);
@@ -1618,6 +1659,10 @@ static void execute_command(int argc, char *arguments[]) {
         command_dnscache();
     } else if (strcmp(command, "sockinfo") == 0) {
         command_sockinfo();
+    } else if (strcmp(command, "platforminfo") == 0) {
+        command_platforminfo();
+    } else if (strcmp(command, "wget") == 0) {
+        command_wget(argc, arguments);
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

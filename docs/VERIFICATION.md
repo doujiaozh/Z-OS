@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 0.9.0 Internet |
+| Version | 1.0.0 Platform |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -65,7 +65,7 @@ exit device. A successful run returns host exit status 33, which is
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=354 failed=0
+ZTEST SUMMARY passed=379 failed=0
 ZTEST RESULT PASS
 ```
 
@@ -87,6 +87,11 @@ construction, offer parsing and lease application, DNS cache insertion, lookup,
 negative entries, expiry and warm resolution, HTTP status line, content length,
 error status, truncated body and URL parsing, socket ownership records, forced
 cleanup of UDP ports and TCP connections, and unknown owner handling.
+A further milestone added 25 checks covering SMEP and SMAP activation against
+CPU capability, CR4 bits, heap KASLR bounds, alignment and slot derivation,
+unified task descriptor initialisation, counters, state, quantum and kind
+naming, select timeout, readable and writable readiness, descriptor mask
+bounds, non-blocking EAGAIN behaviour and socket reclamation.
 A further milestone added 14 checks
 covering double buffer allocation, partial and full frame presentation, dirty
 rectangle merging, VGA CRTC timing readback, sequencer clocking readback,
@@ -138,6 +143,7 @@ Test coverage by area:
 | Network | e1000 presence, guest address, MAC, byte order, IPv4 checksum, header parse and reject, address parse and format, Ethernet parse, ARP cache and replies, UDP bind and delivery, socket lifecycle, ICMP answering, receive accounting |
 | Transport | TCP checksum, header parse, sequence comparison, window clamp, listen, SYN, handshake, accept, receive, FIN, close, checksum rejection, reset, DNS query build, DNS answer parse |
 | Internet | DHCP discover and request, offer parse, lease apply, DNS cache insert, lookup, negative, expiry, warm resolve, HTTP status, content length, errors, truncation, URL parse, socket ownership and cleanup |
+| Platform | SMEP and SMAP activation, CR4 bits, heap KASLR bounds, task base init, counters, state, quantum, select timeout, readable, writable, mask bounds, non-blocking EAGAIN, socket reclamation |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
@@ -361,4 +367,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 0.9.0 test run.
+passing 1.0.0 test run.
