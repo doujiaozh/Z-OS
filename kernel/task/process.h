@@ -7,7 +7,6 @@
 #include "task.h"
 #include "types.h"
 #include "vmm.h"
-#include "avx.h"
 
 #define MAX_PROCESSES 32
 #define PROCESS_STACK_TOP VMM_USER_STACK_TOP
@@ -57,8 +56,6 @@ struct process {
     struct fd_table fds;
     struct credentials cred;
     struct signal_state signals;
-    u8 xsave[PROCESS_XSAVE_SIZE] aligned(64);
-    bool xsave_valid;
     struct process *ready_next;
 };
 
