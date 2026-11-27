@@ -70,55 +70,6 @@ probe_memory:
     ret
 
 load_kernel:
-    cmp byte [boot_drive], 0x80
-    jb .floppy
-    mov ah, 0x41
-    mov bx, 0x55AA
-    int 0x13
-    jc .floppy
-    cmp bx, 0xAA55
-    jne .floppy
-    test cx, 1
-    jz .floppy
-    mov word [sector_index], 0
-.lba_loop:
-    movzx eax, word [sector_index]
-    cmp ax, KERNEL_SECTORS
-    jae .done
-    mov edx, eax
-    shl edx, 9
-    add edx, STAGING
-    mov ecx, edx
-    shr ecx, 4
-    and edx, 0x0F
-    mov [dap_segment], cx
-    mov [dap_offset], dx
-    mov eax, KERNEL_LBA
-    movzx edx, word [sector_index]
-    add eax, edx
-    mov dword [dap_lba], eax
-    mov dword [dap_lba + 4], 0
-    mov eax, KERNEL_SECTORS
-    movzx edx, word [sector_index]
-    sub eax, edx
-    cmp eax, 32
-    jbe .count_ready
-    mov eax, 32
-.count_ready:
-    mov [dap_count], ax
-    mov si, dap
-    mov ah, 0x42
-    mov dl, [boot_drive]
-    int 0x13
-    jc .lba_error
-    movzx eax, word [dap_count]
-    add [sector_index], ax
-    jmp .lba_loop
-.lba_error:
-    mov si, disk_message
-    call print
-    jmp start.hang
-.floppy:
     mov word [sector_index], 0
 .read_one:
     movzx eax, word [sector_index]
@@ -168,20 +119,6 @@ load_kernel:
     jmp .read_one
 .done:
     ret
-
-align 4
-dap:
-    db 0x10
-    db 0
-dap_count:
-    dw 0
-dap_offset:
-    dw 0
-dap_segment:
-    dw 0
-dap_lba:
-    dq 0
-
 
 print:
     mov ah, 0x0E
