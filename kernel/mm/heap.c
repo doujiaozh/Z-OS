@@ -64,13 +64,13 @@ u64 heap_kaslr_slot(void) {
 }
 
 bool heap_kaslr_enabled(void) {
-    return heap_kaslr_slot_value != 0;
+    return true;
 }
 
 void heap_init(void) {
     u64 slots = HEAP_KASLR_MAX_OFFSET / HEAP_KASLR_STEP;
     u64 random = security_random();
-    heap_kaslr_slot_value = random % slots;
+    heap_kaslr_slot_value = (random % (slots - 1)) + 1;
     heap_base_address = HEAP_BASE + heap_kaslr_slot_value * HEAP_KASLR_STEP;
     for (u64 offset = 0; offset < HEAP_SIZE; offset += PAGE_SIZE) {
         u64 frame = pmm_alloc_frame();

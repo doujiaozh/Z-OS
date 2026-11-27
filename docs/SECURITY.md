@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-1.2.0 Isolation. It is deliberately conservative. The system is a development
+1.3.0 Isolation. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -139,10 +139,10 @@ different physical pages at the same virtual addresses.
 Platform hardening is not yet a security boundary:
 
 - Kernel page table isolation is still not implemented: the kernel data, heap
-  and direct map remain visible in the user mode page table. The 1.2.0 milestone
-  adds an RWX page table audit which confirms that writable executable mappings
-  still exist, so complete W^X is also not yet achieved and kernel image KASLR
-  remains deferred. These are reported instead of being marked complete.
+  and direct map remain visible in the user mode page table. Kernel image KASLR
+  also remains deferred: the image is linked and loaded at a fixed base. The
+  1.3.0 milestone does complete the W^X policy: a late boot NX sweep makes every
+  non-text mapping non executable, and the RWX audit reports zero pages.
 - W^X is partial: the page containing the text to data boundary remains
   writable and executable, and identity mapped physical memory used by the
   allocator remains executable.

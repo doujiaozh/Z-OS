@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 1.2.0 implementation as it exists in this
+This document describes the Z-OS 1.3.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -1075,12 +1075,12 @@ kernel object and stack addresses vary per boot. The flat-loaded kernel image
 and the boot page tables remain at fixed addresses.
 
 Kernel page table isolation was designed but not implemented in the 1.1.0
-milestone and remains unimplemented in 1.2.0. An RWX audit helper walks the
-page tables with inherited effective flags; it still reports writable
-executable pages in the low identity region and user mappings, so the W^X
-policy is not yet complete. Kernel image KASLR is likewise not implemented: the
-flat loader places and links the kernel at a fixed physical and virtual base.
-The original 1.1.0 note follows:
+milestone and remains unimplemented in 1.2.0. A late boot NX sweep now sets the no-execute bit on every writable leaf
+mapping outside the kernel text range, so the RWX audit reports zero pages:
+text stays read only and executable, every other mapping is non executable.
+Kernel page table isolation and kernel image KASLR remain unimplemented: the
+user page table still contains kernel mappings, and the flat loader still
+places the kernel at a fixed physical and virtual base. The 1.1.0 note follows:
 the kernel still runs every path with the full process page table. The design
 requires a restricted user page table, entry trampolines and CR3 switching on
 every syscall and interrupt return, and the current return paths (signal

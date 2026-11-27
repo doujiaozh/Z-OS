@@ -88,6 +88,7 @@ void kmain(struct boot_info *boot) {
     wm_init();
     mouse_init();
     mouse_event_init();
+    kernel_nx_sweep();
     sched_init();
 
     if (fb_device_found()) {

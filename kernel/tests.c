@@ -1900,7 +1900,10 @@ static void test_isolation(void)
     extern u8 __data_start[];
     extern u8 __bss_start[];
     u32 sample = 0;
-    check(vmm_audit_rwx(&sample) >= 0, "rwx audit completes over the kernel page tables");
+    kprintf("RWXDBG count=%u sample=%08x\n", vmm_audit_rwx(&sample), sample);
+    check(vmm_audit_rwx(NULL) == 0, "page tables contain no writable executable pages");
+    check(vmm_audit_rwx(&sample) == 0 && sample == 0,
+          "rwx audit reports a zero sample address");
     check(((u64)(usize)__data_start & 0xFFF) == 0 &&
           ((u64)(usize)__bss_start & 0xFFF) == 0,
           "kernel data and bss sections are page aligned");
@@ -1947,7 +1950,42 @@ static void test_isolation(void)
     check(kstack_alloc(64 * 1024) == 0, "guarded stack rejects oversized requests");
     check(!kstack_free(0x12345000ULL), "guarded stack free rejects unknown addresses");
     socket_cleanup_process(920);
-    check(vmm_audit_rwx(NULL) >= 0, "rwx audit remains callable after allocation churn");
+    check(vmm_audit_rwx(NULL) == 0, "rwx audit remains clean after allocation churn");
+    check(heap_kaslr_enabled() && heap_kaslr_slot() >= 1 && heap_kaslr_slot() < 64,
+          "heap kaslr selects a non zero bounded slot");
+    check(heap_base() == HEAP_BASE_DEFAULT + heap_kaslr_slot() * 0x10000ULL,
+          "heap base derives from the kaslr slot");
+    check((vmm_query_flags(heap_base()) & PTE_NO_EXECUTE) != 0,
+          "heap base page is non executable");
+    u64 stack_probe = kstack_alloc(16 * 1024);
+    check(stack_probe != 0 && (vmm_query_flags(stack_probe) & PTE_NO_EXECUTE) != 0,
+          "guarded stack pages are non executable");
+    kstack_free(stack_probe);
+    check(vmm_audit_rwx(NULL) == 0, "rwx audit stays clean after guarded stack churn");
+    check((vmm_query_flags(0x100000ULL) & PTE_WRITABLE) == 0,
+          "kernel image text page is read only");
+    check((vmm_query_flags(0x100000ULL) & PTE_NO_EXECUTE) == 0,
+          "kernel image text page is executable");
+    static u32 data_probe = 1;
+    check((vmm_query_flags((u64)(usize)&data_probe) & PTE_NO_EXECUTE) != 0,
+          "kernel data page is non executable");
+    void *probe_block = kmalloc(64);
+    check(probe_block != NULL && (vmm_query_flags((u64)(usize)probe_block) & PTE_WRITABLE) != 0 &&
+          (vmm_query_flags((u64)(usize)probe_block) & PTE_NO_EXECUTE) != 0,
+          "heap allocation pages are writable and non executable");
+    kfree(probe_block);
+    socket_init();
+    int probe_socket = socket_create_for_owner(930, SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(probe_socket > 0 && socket_bind(probe_socket, 0, 4990) == 0,
+          "audit probe socket binds a port");
+    socket_cleanup_process(930);
+    check(vmm_audit_rwx(NULL) == 0, "rwx audit stays clean after socket churn");
+    check((vmm_query_flags(0x1000ULL) & PTE_NO_EXECUTE) != 0,
+          "boot page tables are non executable");
+    check((vmm_query_flags(0x0ULL) & PTE_NO_EXECUTE) != 0,
+          "real mode identity page is non executable");
+    pmm_free_frame(pmm_alloc_frame());
+    check(vmm_audit_rwx(NULL) == 0, "rwx audit stays clean after mapping probes");
 }
 void selftest_thread(void *argument)
 {

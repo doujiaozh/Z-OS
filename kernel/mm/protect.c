@@ -148,3 +148,77 @@ bool kernel_protect_active(void) {
 u32 kernel_protected_pages(void) {
     return protected_pages;
 }
+
+static void sweep_leaf(u64 *entry, u64 address, bool executable_text,
+                       bool inherited_nx, u32 *nx_count) {
+    if ((entry == NULL) || ((*entry & PTE_PRESENT) == 0)) {
+        return;
+    }
+    bool nx = inherited_nx || ((*entry & PTE_NO_EXECUTE) != 0);
+    bool huge = (*entry & PTE_HUGE) != 0;
+    if (huge) {
+        if (!executable_text && !nx) {
+            *entry = *entry | PTE_NO_EXECUTE;
+            (*nx_count)++;
+        }
+        return;
+    }
+    (void)address;
+}
+
+void kernel_nx_sweep(void) {
+    u64 *pml4 = (u64 *)vmm_pml4_phys();
+    u64 text_start = (u64)(usize)__kernel_start;
+    u64 text_end = (u64)(usize)__data_start;
+    u32 nx_count = 0;
+    for (u32 pml4_index = 0; pml4_index < 512; pml4_index++) {
+        u64 pml4_entry = pml4[pml4_index];
+        if ((pml4_entry & PTE_PRESENT) == 0 || (pml4_entry & PTE_HUGE) != 0) {
+            continue;
+        }
+        u64 *pdpt = (u64 *)(pml4_entry & PTE_ADDRESS);
+        bool pml4_nx = (pml4_entry & PTE_NO_EXECUTE) != 0;
+        for (u32 pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
+            u64 pdpt_entry = pdpt[pdpt_index];
+            if ((pdpt_entry & PTE_PRESENT) == 0) {
+                continue;
+            }
+            u64 pdpt_base = ((u64)pml4_index << 39) | ((u64)pdpt_index << 30);
+            bool pdpt_nx = pml4_nx || ((pdpt_entry & PTE_NO_EXECUTE) != 0);
+            if ((pdpt_entry & PTE_HUGE) != 0) {
+                bool is_text = pdpt_base >= text_start && pdpt_base + (1ULL << 30) <= text_end;
+                sweep_leaf(&pdpt[pdpt_index], pdpt_base, is_text, pdpt_nx, &nx_count);
+                continue;
+            }
+            u64 *pd = (u64 *)(pdpt_entry & PTE_ADDRESS);
+            for (u32 pd_index = 0; pd_index < 512; pd_index++) {
+                u64 pd_entry = pd[pd_index];
+                if ((pd_entry & PTE_PRESENT) == 0) {
+                    continue;
+                }
+                u64 pd_base = pdpt_base | ((u64)pd_index << 21);
+                bool pd_nx = pdpt_nx || ((pd_entry & PTE_NO_EXECUTE) != 0);
+                if ((pd_entry & PTE_HUGE) != 0) {
+                    bool is_text = pd_base >= text_start && pd_base + 0x200000ULL <= text_end;
+                    sweep_leaf(&pd[pd_index], pd_base, is_text, pd_nx, &nx_count);
+                    continue;
+                }
+                u64 *pt = (u64 *)(pd_entry & PTE_ADDRESS);
+                for (u32 pt_index = 0; pt_index < 512; pt_index++) {
+                    u64 pte = pt[pt_index];
+                    if ((pte & PTE_PRESENT) == 0) {
+                        continue;
+                    }
+                    u64 page = pd_base | ((u64)pt_index << 12);
+                    bool is_text = page >= text_start && page < text_end;
+                    if (!is_text && (pd_nx == false) && ((pte & PTE_NO_EXECUTE) == 0)) {
+                        pt[pt_index] = pte | PTE_NO_EXECUTE;
+                        nx_count++;
+                    }
+                }
+            }
+        }
+    }
+    write_cr3(vmm_pml4_phys());
+    (void)nx_count;
+}

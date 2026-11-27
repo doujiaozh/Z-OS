@@ -4,6 +4,7 @@
 #include "types.h"
 
 void kernel_protect_init(void);
+void kernel_nx_sweep(void);
 bool kernel_protect_active(void);
 u32 kernel_protected_pages(void);
 

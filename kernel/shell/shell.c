@@ -262,6 +262,7 @@ static void command_help(void) {
     kprintf("  hardening            report guard pages, canary, nx and w^x state\n");
     kprintf("  polltest             exercise udp poll readability and timeout\n");
     kprintf("  wget [port]          run the ring 3 http download tool\n");
+    kprintf("  dbclient             query the host minidb server over resp2\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -1174,6 +1175,16 @@ static void command_nettest2(int argc, char *arguments[]) {
     kprintf("nettest2: exit status %llu\n", status);
 }
 
+static void command_dbclient(void) {
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("dbclient", user_dbclient_start, user_dbclient_end, &status);
+    if (pid == 0) {
+        kprintf("dbclient: program failed to run\n");
+        return;
+    }
+    kprintf("dbclient: exit status %llu\n", status);
+}
+
 static void command_dhcp(void) {
     if (!net_ready()) {
         kprintf("dhcp: network is not ready\n");
@@ -1690,6 +1701,8 @@ static void execute_command(int argc, char *arguments[]) {
         command_tcplisten(argc, arguments);
     } else if (strcmp(command, "nettest2") == 0) {
         command_nettest2(argc, arguments);
+    } else if (strcmp(command, "dbclient") == 0) {
+        command_dbclient();
     } else if (strcmp(command, "dhcp") == 0) {
         command_dhcp();
     } else if (strcmp(command, "http") == 0) {
