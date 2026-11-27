@@ -109,7 +109,8 @@ static int e1000_map_registers(u64 physical) {
         u64 virtual_address = base + index * PAGE_SIZE;
         u64 frame = physical + index * PAGE_SIZE;
         if (vmm_map_device_page(virtual_address, frame,
-                                PTE_PRESENT | PTE_WRITABLE | PTE_CACHE_DISABLE | PTE_WRITE_THROUGH) != 0) {
+                                PTE_PRESENT | PTE_WRITABLE | PTE_CACHE_DISABLE | PTE_WRITE_THROUGH |
+                                PTE_NO_EXECUTE) != 0) {
             return -1;
         }
     }

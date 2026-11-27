@@ -148,7 +148,7 @@ int elf_load(const void *image, u64 size, u64 *entry) {
             }
             u64 page_flags = PTE_PRESENT | PTE_USER;
             if ((program.flags & ELF_FLAG_WRITE) != 0) {
-                page_flags |= PTE_WRITABLE;
+                page_flags |= PTE_WRITABLE | PTE_NO_EXECUTE;
             }
             u64 virtual_address = program.virtual_address + page * PAGE_SIZE;
             if (vmm_map_page(virtual_address, frame, page_flags) != 0) {
@@ -211,7 +211,7 @@ int elf_load_into(struct address_space *space, const void *image, u64 size, u64 
             }
             u64 page_flags = PTE_PRESENT | PTE_USER;
             if ((program.flags & ELF_FLAG_WRITE) != 0) {
-                page_flags |= PTE_WRITABLE;
+                page_flags |= PTE_WRITABLE | PTE_NO_EXECUTE;
             }
             u64 virtual_address = program.virtual_address + page * PAGE_SIZE;
             if (vmm_map_user_page(space, virtual_address, frame, page_flags) != 0) {

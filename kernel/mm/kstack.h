@@ -16,5 +16,6 @@ u64 kstack_total(void);
 u64 kstack_guard_address(u64 base);
 bool kstack_guard_unmapped(u64 base);
 bool kstack_is_managed(u64 base);
+bool kstack_guard_fault(u64 address);
 
 #endif

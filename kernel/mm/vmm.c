@@ -180,7 +180,7 @@ int vmm_map_device_page(u64 virtual_address, u64 physical_address, u64 flags) {
         device_pd[pd_index] = pt_frame | PTE_PRESENT | PTE_WRITABLE;
     }
     u64 *pt = table_from_entry(device_pd[pd_index]);
-    pt[pt_index] = (physical_address & ADDRESS_MASK) | (flags & 0xFFF) | PTE_PRESENT;
+    pt[pt_index] = (physical_address & ADDRESS_MASK) | (flags & (0xFFF | PTE_NO_EXECUTE)) | PTE_PRESENT;
     tlb_flush(virtual_address);
     spin_unlock_irqrestore(&vmm_lock, lock_flags);
     return 0;
@@ -279,6 +279,44 @@ u64 vmm_query_flags(u64 virtual_address) {
     u64 *pt = table_from_entry(pd[pd_index]);
     u32 pt_index = (u32)((virtual_address >> 12) & 0x1FF);
     return pt[pt_index];
+}
+
+static void audit_walk(u64 entry, u64 base, u32 level, bool writable_chain, bool nx_chain,
+                       u32 *count, u64 *sample) {
+    if ((entry & PTE_PRESENT) == 0) {
+        return;
+    }
+    bool writable = writable_chain && (entry & PTE_WRITABLE) != 0;
+    bool nx = nx_chain || (entry & PTE_NO_EXECUTE) != 0;
+    bool huge = (entry & PTE_HUGE) != 0;
+    if (level == 1 || huge) {
+        if (writable && !nx) {
+            (*count)++;
+            if (*sample == 0) {
+                *sample = base;
+            }
+        }
+        return;
+    }
+    u64 *next_table = (u64 *)(entry & PTE_ADDRESS);
+    u32 child_shift = 12 + 9 * (level - 1);
+    for (u32 index = 0; index < 512; index++) {
+        audit_walk(next_table[index], base | ((u64)index << child_shift), level - 1,
+                   writable, nx, count, sample);
+    }
+}
+
+u32 vmm_audit_rwx(u32 *sample_address) {
+    u64 *pml4 = (u64 *)vmm_pml4_phys();
+    u32 count = 0;
+    u64 sample = 0;
+    for (u32 index = 0; index < 512; index++) {
+        audit_walk(pml4[index], (u64)index << 39, 4, true, false, &count, &sample);
+    }
+    if (sample_address != NULL) {
+        *sample_address = (u32)sample;
+    }
+    return count;
 }
 
 u64 vmm_get_physical(u64 virtual_address) {
@@ -554,7 +592,7 @@ int vmm_map_user_page(struct address_space *space, u64 virtual_address, u64 phys
         user_pd[pd_index] |= PTE_USER;
     }
     u64 *pt = table_from_entry(user_pd[pd_index]);
-    pt[pt_index] = (physical_address & ADDRESS_MASK) | (flags & 0xFFF) | PTE_PRESENT;
+    pt[pt_index] = (physical_address & ADDRESS_MASK) | (flags & (0xFFF | PTE_NO_EXECUTE)) | PTE_PRESENT;
     if (vmm_pml4_phys() == space->pml4_phys) {
         tlb_flush(virtual_address);
     }

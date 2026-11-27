@@ -128,3 +128,15 @@ bool kstack_is_managed(u64 base) {
     }
     return false;
 }
+
+bool kstack_guard_fault(u64 address) {
+    if (address < KSTACK_WINDOW_BASE) {
+        return false;
+    }
+    u64 offset = address - KSTACK_WINDOW_BASE;
+    u64 span = (u64)KSTACK_SLOT_COUNT * (KSTACK_MAX_PAGES + 1) * PAGE_SIZE;
+    if (offset >= span) {
+        return false;
+    }
+    return (offset % ((KSTACK_MAX_PAGES + 1) * PAGE_SIZE)) == 0;
+}

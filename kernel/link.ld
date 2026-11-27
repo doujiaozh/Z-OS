@@ -17,13 +17,13 @@ SECTIONS
         *(.rodata .rodata.*)
     }
 
-    .data : ALIGN(16)
+    .data : ALIGN(0x1000)
     {
         __data_start = .;
         *(.data .data.*)
     }
 
-    .bss : ALIGN(16)
+    .bss : ALIGN(0x1000)
     {
         __bss_start = .;
         *(.bss .bss.*)

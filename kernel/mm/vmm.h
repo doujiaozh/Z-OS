@@ -42,6 +42,7 @@ int vmm_map_range(u64 virtual_address, u64 physical_address, u64 page_count, u64
 int vmm_unmap_page(u64 virtual_address);
 u64 vmm_get_physical(u64 virtual_address);
 u64 vmm_query_flags(u64 virtual_address);
+u32 vmm_audit_rwx(u32 *sample_address);
 bool vmm_is_mapped(u64 virtual_address);
 bool vmm_user_range_valid(u64 address, u64 length);
 int vmm_create_address_space(struct address_space *space);

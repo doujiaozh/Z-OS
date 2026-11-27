@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-1.1.0 Hardening. It is deliberately conservative. The system is a development
+1.2.0 Isolation. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -138,10 +138,11 @@ different physical pages at the same virtual addresses.
 
 Platform hardening is not yet a security boundary:
 
-- Kernel page table isolation is not implemented: the kernel data, heap and
-  direct map remain visible in the user mode page table, so user mode can read
-  kernel memory through Spectre style side channels and a kernel write primitive
-  would have full access.
+- Kernel page table isolation is still not implemented: the kernel data, heap
+  and direct map remain visible in the user mode page table. The 1.2.0 milestone
+  adds an RWX page table audit which confirms that writable executable mappings
+  still exist, so complete W^X is also not yet achieved and kernel image KASLR
+  remains deferred. These are reported instead of being marked complete.
 - W^X is partial: the page containing the text to data boundary remains
   writable and executable, and identity mapped physical memory used by the
   allocator remains executable.

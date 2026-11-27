@@ -69,12 +69,25 @@ void sched_user_tick(void) {
 }
 
 static void activate_process(struct process *process) {
+    struct process *previous = process_current();
+    if (previous != NULL && previous != process && cpu_avx_active()) {
+        arch_xsave(previous->xsave);
+        previous->xsave_valid = true;
+    }
     process->state = PROCESS_RUNNING;
     process->quantum = PROCESS_QUANTUM_TICKS;
     process->context_switches++;
     process_set_current(process);
     write_cr3(process->space.pml4_phys);
     tss_set_rsp0(process->kernel_stack_top);
+    if (cpu_avx_active()) {
+        if (!process->xsave_valid) {
+            memset(process->xsave, 0, sizeof(process->xsave));
+            arch_xsave(process->xsave);
+            process->xsave_valid = true;
+        }
+        arch_xrstor(process->xsave);
+    }
 }
 
 static bool batch_has_blocked_process(void) {

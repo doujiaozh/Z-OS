@@ -127,7 +127,7 @@ static int process_load_user_stack(struct process *process) {
         return PROCESS_ERROR_MEMORY;
     }
     if (vmm_map_user_page(&process->space, VMM_USER_STACK_BASE, stack_frame,
-                          PTE_PRESENT | PTE_WRITABLE | PTE_USER) != 0) {
+                          PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NO_EXECUTE) != 0) {
         pmm_free_frame(stack_frame);
         return PROCESS_ERROR_MEMORY;
     }

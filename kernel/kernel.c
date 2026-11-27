@@ -1,4 +1,5 @@
 #include "ata.h"
+#include "avx.h"
 #include "boot.h"
 #include "e1000.h"
 #include "console.h"
@@ -54,6 +55,7 @@ void kmain(struct boot_info *boot) {
     kprintf("Long mode: EFER.LME verified, CR4.PAE verified\n");
     security_init();
     security_init_canary();
+    cpu_avx_init();
 
     gdt_init();
     interrupts_init();

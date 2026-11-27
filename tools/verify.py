@@ -98,7 +98,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=402 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=426 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 

@@ -6,6 +6,8 @@
 #include "console.h"
 #include "e1000.h"
 #include "keyboard.h"
+#include "kstack.h"
+#include "process.h"
 #include "serial.h"
 #include "timer.h"
 #include "mouse.h"
@@ -115,6 +117,11 @@ static void exception_panic(struct registers *registers) {
 void interrupt_dispatch(struct registers *registers) {
     u64 vector = registers->vector;
     if (vector < 32) {
+        if (vector == 14 && process_current() != NULL && kstack_guard_fault(read_cr2())) {
+            kprintf("stack guard fault terminated process %llu\n", process_current()->pid);
+            sched_terminate_current(0x120ULL);
+            return;
+        }
         if ((registers->cs & 3) == 3) {
             sched_terminate_current(0x100ULL | vector);
         }

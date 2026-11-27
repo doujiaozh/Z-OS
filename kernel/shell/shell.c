@@ -1272,6 +1272,7 @@ static void command_hardening(void) {
             kernel_protect_active() ? "on" : "off",
             __stack_chk_guard != 0 ? "on" : "off");
     kprintf("hardening protected pages: %u\n", kernel_protected_pages());
+    kprintf("hardening rwx pages: %u\n", vmm_audit_rwx(NULL));
     kprintf("hardening kernel stacks used: %llu of %llu\n",
             (unsigned long long)kstack_used(), (unsigned long long)kstack_total());
 }

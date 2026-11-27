@@ -1895,6 +1895,60 @@ static void test_hardening(void)
     socket_cleanup_process(910);
     check(!socket_valid(descriptor), "poll test socket is reclaimed");
 }
+static void test_isolation(void)
+{
+    extern u8 __data_start[];
+    extern u8 __bss_start[];
+    u32 sample = 0;
+    check(vmm_audit_rwx(&sample) >= 0, "rwx audit completes over the kernel page tables");
+    check(((u64)(usize)__data_start & 0xFFF) == 0 &&
+          ((u64)(usize)__bss_start & 0xFFF) == 0,
+          "kernel data and bss sections are page aligned");
+    check((vmm_query_flags(0x8000000ULL) & PTE_NO_EXECUTE) != 0,
+          "identity mapped low memory is non executable");
+    check((vmm_query_flags(0x20000000ULL) & PTE_NO_EXECUTE) != 0,
+          "identity mapped high memory is non executable");
+    check((vmm_query_flags(0xFFFFFFFF80000000ULL) & PTE_NO_EXECUTE) != 0,
+          "kernel direct map is non executable");
+    check((vmm_query_flags(0xFFFFFFFF40000000ULL) & PTE_NO_EXECUTE) != 0,
+          "device memory window is non executable");
+    check(kernel_protected_pages() >= 20, "kernel protection covers image pages");
+    u64 first_stack = kstack_alloc(16 * 1024);
+    check(first_stack != 0, "isolation test allocates a guarded stack");
+    u64 guard = kstack_guard_address(first_stack);
+    check(kstack_guard_fault(guard) && kstack_guard_fault(guard + 0x9000ULL),
+          "guard fault classifier recognises guard pages");
+    check(kstack_guard_fault(first_stack) == false &&
+          kstack_guard_fault(first_stack + PAGE_SIZE) == false,
+          "guard fault classifier rejects mapped stack pages");
+    check(!kstack_guard_fault(0x200000ULL) && !kstack_guard_fault(0x60000000ULL),
+          "guard fault classifier rejects kernel and heap addresses");
+    check(kstack_free(first_stack), "isolation test releases the guarded stack");
+    check(KSTACK_WINDOW_BASE >= HEAP_BASE_DEFAULT + HEAP_WINDOW_SIZE,
+          "guarded stack window is separated from the heap window");
+    check(kstack_total() == KSTACK_SLOT_COUNT, "guarded stack slot capacity is fixed");
+    check((read_cr0() & (1ULL << 16)) != 0, "write protect remains enabled");
+    socket_init();
+    check(socket_events(999) == SOCKET_POLLERR, "socket events report invalid descriptors");
+    int descriptor = socket_create_for_owner(920, SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(descriptor > 0 && socket_bind(descriptor, 0, 4980) == 0,
+          "isolation poll socket binds a port");
+    check(udp_inject_datagram(4980, NET_IPV4(10, 0, 2, 2), 8300, "iso", 3) == 0,
+          "isolation poll socket queues a datagram");
+    check(socket_poll_events((u32)descriptor, 0) == 0,
+          "poll event masks filter unrequested readiness");
+    struct pollfd_user entry;
+    entry.fd = descriptor;
+    entry.events = 0;
+    entry.revents = 0;
+    check(syscall_poll_register(&entry, 1, 20) == 0 && entry.revents == 0,
+          "poll with an empty event mask times out");
+    check(syscall_poll_register(&entry, 0, 10) == 0, "poll with zero entries returns immediately");
+    check(kstack_alloc(64 * 1024) == 0, "guarded stack rejects oversized requests");
+    check(!kstack_free(0x12345000ULL), "guarded stack free rejects unknown addresses");
+    socket_cleanup_process(920);
+    check(vmm_audit_rwx(NULL) >= 0, "rwx audit remains callable after allocation churn");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1932,6 +1986,7 @@ void selftest_thread(void *argument)
     test_internet();
     test_platform();
     test_hardening();
+    test_isolation();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");
