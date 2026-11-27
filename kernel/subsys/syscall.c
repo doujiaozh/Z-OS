@@ -14,6 +14,7 @@
 #include "security.h"
 #include "signal.h"
 #include "dns.h"
+#include "net.h"
 #include "socket.h"
 #include "string.h"
 #include "thread.h"
@@ -62,6 +63,7 @@
 #define SYS_GET_TEST_PORT 37
 #define SYS_SELECT 38
 #define SYS_SET_NONBLOCKING 39
+#define SYS_POLL 40
 
 static bool gui_enter_flag = false;
 static bool gui_exit_flag = false;
@@ -585,6 +587,50 @@ static u64 syscall_set_nonblocking(struct registers *registers) {
     return 0;
 }
 
+u64 syscall_poll_register(struct pollfd_user *entries, u32 count, u32 timeout_ms) {
+    u32 iterations = timeout_ms / 10 + 1;
+    for (u32 elapsed = 0; elapsed < iterations; elapsed++) {
+        u32 ready = 0;
+        for (u32 index = 0; index < count; index++) {
+            if (entries[index].fd < 0) {
+                entries[index].revents = 0;
+                continue;
+            }
+            u32 revents = socket_poll_events((u32)entries[index].fd, entries[index].events);
+            entries[index].revents = (u16)revents;
+            if (revents != 0) {
+                ready++;
+            }
+        }
+        if (ready > 0 || elapsed + 1 >= iterations) {
+            return (u64)ready;
+        }
+        net_delay_ms(10);
+    }
+    return 0;
+}
+
+static u64 syscall_poll(struct registers *registers) {
+    u64 fds_address = registers->rdi;
+    u32 count = (u32)registers->rsi;
+    u32 timeout_ms = (u32)registers->rdx;
+    if (count == 0 || count > 16) {
+        return (u64)(i64)-1;
+    }
+    if (!syscall_buffer_valid(fds_address, (u64)count * sizeof(struct pollfd_user))) {
+        return (u64)(i64)-1;
+    }
+    struct pollfd_user entries[16];
+    security_stac();
+    memcpy(entries, (const void *)(usize)fds_address, (usize)count * sizeof(struct pollfd_user));
+    security_clac();
+    u64 ready = syscall_poll_register(entries, count, timeout_ms);
+    security_stac();
+    memcpy((void *)(usize)fds_address, entries, (usize)count * sizeof(struct pollfd_user));
+    security_clac();
+    return ready;
+}
+
 static u64 syscall_mouse(struct registers *registers) {
     u64 destination = registers->rdi;
     if (destination == 0 || !syscall_buffer_valid(destination, 16)) {
@@ -734,6 +780,9 @@ void syscall_dispatch(struct registers *registers) {
             break;
         case SYS_SET_NONBLOCKING:
             registers->rax = syscall_set_nonblocking(registers);
+            break;
+        case SYS_POLL:
+            registers->rax = syscall_poll(registers);
             break;
         default:
             registers->rax = (u64)-1;

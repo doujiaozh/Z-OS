@@ -16,6 +16,7 @@
 #include "fd.h"
 #include "font.h"
 #include "heap.h"
+#include "kstack.h"
 #include "http.h"
 #include "input.h"
 #include "interrupts.h"
@@ -23,6 +24,7 @@
 #include "kernel.h"
 #include "lib.h"
 #include "pmm.h"
+#include "protect.h"
 #include "fb.h"
 #include "gfx.h"
 #include "power.h"
@@ -36,6 +38,7 @@
 #include "mouse.h"
 #include "rtc.h"
 #include "string.h"
+#include "syscall.h"
 #include "thread.h"
 #include "timer.h"
 #include "user.h"
@@ -1812,6 +1815,86 @@ static void test_platform(void)
     socket_cleanup_process(900);
     check(!socket_valid(udp_descriptor), "select test socket is reclaimed");
 }
+static void test_hardening(void)
+{
+    extern u64 __stack_chk_guard;
+    u64 used_before = kstack_used();
+    u64 first_stack = kstack_alloc(16 * 1024);
+    check(first_stack != 0 && kstack_is_managed(first_stack) && kstack_used() == used_before + 1,
+          "guarded kernel stack allocation is tracked");
+    u64 guard = kstack_guard_address(first_stack);
+    check(guard + 4096 == first_stack && vmm_get_physical(guard) == 0,
+          "kernel stack guard page is unmapped");
+    u64 first_flags = vmm_query_flags(first_stack);
+    check((first_flags & PTE_PRESENT) != 0 && (first_flags & PTE_NO_EXECUTE) != 0,
+          "kernel stack pages are non executable");
+    check(kstack_free(first_stack) && kstack_used() == used_before &&
+          vmm_get_physical(first_stack) == 0 && vmm_get_physical(guard) == 0,
+          "kernel stack free releases pages and keeps the guard");
+    u64 second_stack = kstack_alloc(32 * 1024);
+    u64 third_stack = kstack_alloc(16 * 1024);
+    check(second_stack != 0 && third_stack != 0 && second_stack != third_stack &&
+          kstack_used() == used_before + 2, "kernel stacks allocate distinct guarded slots");
+    kstack_free(second_stack);
+    kstack_free(third_stack);
+    check(security_canary() != 0, "stack canary is initialised from boot entropy");
+    check(__stack_chk_guard == security_canary(), "stack guard symbol matches the runtime canary");
+    check(security_nx_supported() == security_nx_active(),
+          "nx activation matches cpu capability");
+    check(kernel_protect_active() && kernel_protected_pages() > 0,
+          "kernel section protection is active");
+    u64 text_flags = vmm_query_flags((u64)(usize)&security_init);
+    check((text_flags & PTE_PRESENT) != 0 && (text_flags & PTE_WRITABLE) == 0 &&
+          (text_flags & PTE_NO_EXECUTE) == 0,
+          "kernel text is read only and executable");
+    u64 data_flags = vmm_query_flags((u64)(usize)&__stack_chk_guard);
+    check((data_flags & PTE_WRITABLE) != 0 && (data_flags & PTE_NO_EXECUTE) != 0,
+          "kernel data is writable and non executable");
+    check((read_cr0() & (1ULL << 16)) != 0, "write protect bit is enabled in cr0");
+    void *heap_block = kmalloc(64);
+    check(heap_block != NULL && (vmm_query_flags((u64)(usize)heap_block) & PTE_NO_EXECUTE) != 0,
+          "heap pages are non executable");
+    kfree(heap_block);
+    check(KSTACK_WINDOW_BASE >= HEAP_BASE_DEFAULT + HEAP_WINDOW_SIZE,
+          "guarded stack window sits above the heap window");
+    socket_init();
+    int descriptor = socket_create_for_owner(910, SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    check(descriptor > 0 && socket_bind(descriptor, 0, 4975) == 0, "poll test socket binds");
+    struct pollfd_user entry;
+    entry.fd = descriptor;
+    entry.events = SOCKET_POLLIN;
+    entry.revents = 0xFFFF;
+    check(syscall_poll_register(&entry, 1, 50) == 0 && entry.revents == 0,
+          "poll reports a timeout on an idle socket");
+    check(udp_inject_datagram(4975, NET_IPV4(10, 0, 2, 2), 8200, "poll", 4) == 0,
+          "poll test queues a datagram");
+    entry.revents = 0;
+    check(syscall_poll_register(&entry, 1, 500) >= 1 &&
+          (entry.revents & SOCKET_POLLIN) != 0, "poll reports readable datagram sockets");
+    entry.revents = 0;
+    entry.events = SOCKET_POLLOUT;
+    check(syscall_poll_register(&entry, 1, 50) >= 1 &&
+          (entry.revents & SOCKET_POLLOUT) != 0, "poll reports writable datagram sockets");
+    struct pollfd_user entries[2];
+    entries[0].fd = descriptor;
+    entries[0].events = SOCKET_POLLIN;
+    entries[0].revents = 0;
+    entries[1].fd = -1;
+    entries[1].events = SOCKET_POLLIN;
+    entries[1].revents = 0xFFFF;
+    check(syscall_poll_register(entries, 2, 100) >= 1 && entries[1].revents == 0,
+          "poll ignores negative descriptor entries");
+    entries[0].fd = -1;
+    check(syscall_poll_register(entries, 2, 20) == 0, "poll times out when every entry is idle");
+    struct pollfd_user invalid;
+    invalid.fd = 999;
+    invalid.events = SOCKET_POLLIN;
+    invalid.revents = 0;
+    check(syscall_poll_register(&invalid, 1, 20) >= 1 &&
+          (invalid.revents & SOCKET_POLLERR) != 0, "poll reports invalid descriptors as errors");
+    socket_cleanup_process(910);
+    check(!socket_valid(descriptor), "poll test socket is reclaimed");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -1848,6 +1931,7 @@ void selftest_thread(void *argument)
     test_tcp();
     test_internet();
     test_platform();
+    test_hardening();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

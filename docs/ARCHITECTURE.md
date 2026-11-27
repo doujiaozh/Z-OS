@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 1.0.0 implementation as it exists in this
+This document describes the Z-OS 1.1.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -15,7 +15,7 @@ repository. It distinguishes implemented mechanisms from planned work.
 - Leave clean extension points for processes, storage, networking, SMP, and
   compatibility layers.
 
-Non-goals for 1.0.0:
+Non-goals for 1.1.0:
 
 - Binary compatibility with Windows, Linux, or macOS.
 - Production security, hardware certification, or data durability.
@@ -597,6 +597,7 @@ Syscall ABI:
 | 37 | get_test_port | none | configured user network test port |
 | 38 | select | RDI=read mask, RSI=write mask, RDX=timeout, R10=ready read out, R8=ready write out | ready count or -1 |
 | 39 | set_nonblocking | RDI=descriptor, RSI=enable | 0 or -1 |
+| 40 | poll | RDI=pollfd array, RSI=count, RDX=timeout | ready count or -1 |
 
 Only file descriptors 1 and 2 are accepted by `write`, and both target the
 kernel console. Buffers must be fully mapped with user permission and are
@@ -1042,6 +1043,53 @@ configured test host, send a HTTP/1.0 GET request, read the response, locate the
 header terminator, and write the body to `/wget.out` through the file system
 calls. The shell command `wget <port>` creates the output file, copies the port
 into the kernel test configuration, runs the program and reports its status.
+
+## Kernel hardening
+
+Guard pages: `kernel/mm/kstack.c` manages kernel stacks in a dedicated window
+above the heap. The window is shared into every process address space through
+the same page directory entries as the heap. Each slot reserves one unmapped
+guard page followed by the mapped stack pages, so a downward stack overflow
+hits an unmapped page instead of neighbouring memory. Threads and process
+kernel stacks both use this allocator, and freeing unmaps and returns the
+frames.
+
+Stack canaries: the build adds `-fstack-protector-strong`, the kernel defines
+`__stack_chk_guard` and `__stack_chk_fail`, and the canary is seeded from the
+boot entropy source before kernel threads start. A corrupted canary calls
+`panic`.
+
+NX and W^X: extended feature detection enables EFER.NXE and the kernel sets
+CR0.WP. `kernel/mm/protect.c` splits the low identity page directory so the
+kernel image is mapped with 4 KiB pages: text and read-only data lose the
+writable bit, data and BSS gain the no-execute bit, and the page containing the
+text to data boundary stays writable and executable because section boundaries
+are not page aligned. Heap, guarded stacks and DMA buffer pages are mapped no
+execute. This is a partial W^X policy: the kernel image is split and data pages
+are non executable, but the boundary page and the identity mappings for the
+physical memory manager remain executable.
+
+KASLR: the heap base slot inside the reserved heap window is randomized from
+timestamp entropy, and guarded stacks live above the heap in a fixed window, so
+kernel object and stack addresses vary per boot. The flat-loaded kernel image
+and the boot page tables remain at fixed addresses.
+
+Kernel page table isolation was designed but not implemented in this milestone:
+the kernel still runs every path with the full process page table. The design
+requires a restricted user page table, entry trampolines and CR3 switching on
+every syscall and interrupt return, and the current return paths (signal
+delivery, fork resume, timer preemption) would all need auditing. It is the
+first item of the next hardening milestone.
+
+## Poll and readiness
+
+`kernel/net/socket.c` exposes `socket_events`, mapping UDP queue state and TCP
+receive, send and accept readiness to POLLIN, POLLOUT and POLLERR. System call
+40 implements poll over up to sixteen `struct pollfd` entries, copying the array
+under an AC window, polling until any descriptor is ready or the timeout
+expires, and writing revents back. `user/libc.h` provides `struct pollfd` and
+`net_poll`, and the shell `polltest` command exercises idle, readable and
+timeout behaviour.
 
 ## Console and shell
 

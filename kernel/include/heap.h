@@ -11,6 +11,8 @@ struct heap_stats {
     u64 largest_free_block;
 };
 
+#define HEAP_BASE_DEFAULT 0x60000000ULL
+#define HEAP_WINDOW_SIZE (8ULL * 1024 * 1024)
 void heap_init(void);
 u64 heap_base(void);
 u64 heap_kaslr_slot(void);

@@ -219,7 +219,7 @@ int vmm_map_page(u64 virtual_address, u64 physical_address, u64 flags) {
     if ((*pte & PTE_PRESENT) == 0) {
         mapped_pages++;
     }
-    *pte = (physical_address & ADDRESS_MASK) | (flags & 0xFFF) | PTE_PRESENT;
+    *pte = (physical_address & ADDRESS_MASK) | (flags & (0xFFF | PTE_NO_EXECUTE)) | PTE_PRESENT;
     tlb_flush(virtual_address);
     spin_unlock_irqrestore(&vmm_lock, lock_flags);
     return 0;
@@ -252,6 +252,33 @@ int vmm_unmap_page(u64 virtual_address) {
     tlb_flush(virtual_address);
     spin_unlock_irqrestore(&vmm_lock, lock_flags);
     return 0;
+}
+
+u64 vmm_query_flags(u64 virtual_address) {
+    u64 *pml4 = (u64 *)vmm_pml4_phys();
+    u32 pml4_index = (u32)((virtual_address >> 39) & 0x1FF);
+    if ((pml4[pml4_index] & PTE_PRESENT) == 0) {
+        return 0;
+    }
+    u64 *pdpt = table_from_entry(pml4[pml4_index]);
+    u32 pdpt_index = (u32)((virtual_address >> 30) & 0x1FF);
+    if ((pdpt[pdpt_index] & PTE_PRESENT) == 0) {
+        return 0;
+    }
+    if ((pdpt[pdpt_index] & PTE_HUGE) != 0) {
+        return pdpt[pdpt_index];
+    }
+    u64 *pd = table_from_entry(pdpt[pdpt_index]);
+    u32 pd_index = (u32)((virtual_address >> 21) & 0x1FF);
+    if ((pd[pd_index] & PTE_PRESENT) == 0) {
+        return 0;
+    }
+    if ((pd[pd_index] & PTE_HUGE) != 0) {
+        return pd[pd_index];
+    }
+    u64 *pt = table_from_entry(pd[pd_index]);
+    u32 pt_index = (u32)((virtual_address >> 12) & 0x1FF);
+    return pt[pt_index];
 }
 
 u64 vmm_get_physical(u64 virtual_address) {

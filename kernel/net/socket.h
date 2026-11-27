@@ -7,6 +7,9 @@
 #define SOCKET_AF_INET 2
 #define SOCKET_EAGAIN 11
 #define SOCKET_EINVAL 22
+#define SOCKET_POLLIN 0x0001
+#define SOCKET_POLLOUT 0x0004
+#define SOCKET_POLLERR 0x0008
 #define SOCKET_SOCK_STREAM 1
 #define SOCKET_SOCK_DGRAM 2
 
@@ -33,6 +36,8 @@ int socket_set_nonblocking(int descriptor, bool enabled);
 bool socket_is_nonblocking(int descriptor);
 bool socket_read_ready(int descriptor);
 bool socket_write_ready(int descriptor);
+u32 socket_events(int descriptor);
+u32 socket_poll_events(u32 fd, u32 events);
 u32 socket_select(u32 read_mask, u32 write_mask, u32 timeout_ms,
                   u32 *ready_read, u32 *ready_write);
 

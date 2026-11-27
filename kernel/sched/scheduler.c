@@ -1,3 +1,4 @@
+#include "kstack.h"
 #include "task.h"
 #include "thread.h"
 #include "gdt.h"
@@ -121,12 +122,13 @@ u64 sched_create_thread(const char *name, thread_entry_t entry, void *argument) 
     struct thread *thread = &threads[slot];
     memset(thread, 0, sizeof(*thread));
     thread->stack_size = THREAD_STACK_SIZE;
-    thread->stack_base = (u64)kmalloc(THREAD_STACK_SIZE);
+    thread->stack_base = kstack_alloc(THREAD_STACK_SIZE);
     if (thread->stack_base == 0) {
         thread->state = THREAD_UNUSED;
         irq_restore(flags);
         return 0;
     }
+    task_base_init(&thread->task, TASK_KIND_THREAD, slot);
     thread->pid = next_pid++;
     strncpy(thread->name, name, sizeof(thread->name) - 1);
     thread->entry = entry;
@@ -285,7 +287,7 @@ void sched_reap(void) {
     for (u32 index = 1; index < thread_count; index++) {
         if (threads[index].state == THREAD_ZOMBIE) {
             if (threads[index].stack_base != 0) {
-                kfree((void *)(usize)threads[index].stack_base);
+                kstack_free(threads[index].stack_base);
             }
             memset(&threads[index], 0, sizeof(threads[index]));
         }

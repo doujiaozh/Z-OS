@@ -4,6 +4,8 @@
 #include "console.h"
 #include "gdt.h"
 #include "heap.h"
+#include "kstack.h"
+#include "protect.h"
 #include "interrupts.h"
 #include "io.h"
 #include "kernel.h"
@@ -51,6 +53,7 @@ void kmain(struct boot_info *boot) {
     }
     kprintf("Long mode: EFER.LME verified, CR4.PAE verified\n");
     security_init();
+    security_init_canary();
 
     gdt_init();
     interrupts_init();
@@ -59,6 +62,8 @@ void kmain(struct boot_info *boot) {
     pmm_init(boot);
     vmm_init();
     heap_init();
+    kstack_init();
+    kernel_protect_init();
     vfs_init();
     ata_init();
     if (ata_present()) {

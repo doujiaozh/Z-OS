@@ -9,6 +9,7 @@
 #include "string.h"
 #include "timer.h"
 #include "vmm.h"
+#include "kstack.h"
 #include "socket.h"
 #include "waitq.h"
 
@@ -47,7 +48,7 @@ static void release_process(struct process *process) {
         return;
     }
     if (process->kernel_stack_base != 0) {
-        kfree((void *)(usize)process->kernel_stack_base);
+        kstack_free(process->kernel_stack_base);
         process->kernel_stack_base = 0;
     }
     memset(process, 0, sizeof(struct process));
@@ -135,7 +136,7 @@ static int process_load_user_stack(struct process *process) {
 }
 
 static int process_allocate_kernel_stack(struct process *process) {
-    process->kernel_stack_base = (u64)kmalloc(PROCESS_KERNEL_STACK_SIZE);
+    process->kernel_stack_base = kstack_alloc(PROCESS_KERNEL_STACK_SIZE);
     if (process->kernel_stack_base == 0) {
         return PROCESS_ERROR_MEMORY;
     }

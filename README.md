@@ -23,7 +23,7 @@ general-purpose OS are documented in [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Current status
 
-Version 1.0.0, codename Platform. Development quality. Not production ready.
+Version 1.1.0, codename Hardening. Development quality. Not production ready.
 
 | Area | State |
 | --- | --- |
@@ -39,7 +39,7 @@ Version 1.0.0, codename Platform. Development quality. Not production ready.
 | User mode | Ring-3 static ELF64 C process, TSS kernel stack, `int 0x80` syscalls |
 | Graphics | PCI VGA, gfx surfaces, fonts, mouse events, compositor, desktop shell |
 | Shell | Directory and file commands, system information, ELF process launcher |
-| Verification | 379 in-kernel tests, boot, storage, network, tcp, internet, platform, desktop tests |
+| Verification | 402 in-kernel tests, boot, storage, network, tcp, internet, platform, hardening, desktop tests |
 
 Implemented and verified:
 
@@ -178,7 +178,7 @@ python tools/verify.py keyboard
 python tools/verify.py shell
 ```
 
-The self-test image runs 379 in-kernel checks covering physical memory,
+The self-test image runs 402 in-kernel checks covering physical memory,
 paging, the heap, the VFS, formatting, the RTC, timer wakeups, kernel threads,
 ELF64 validation, per-process address spaces, high-half mapping, process
 lifecycle, preemptive time slicing, fork continuation, blocking wait,
@@ -391,8 +391,8 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `forktest`, `postest`, `guitest2`, `gfx`, `diskinfo`, `format`, `zmount`,
 `zls`, `zsave`, `zcat`, `zrm`, `zsync`, `mouse`, `netinfo`, `arp`, `ping`,
 `udp-echo`, `dnsserver`, `dnsport`, `dns`, `tcptest`, `tcplisten`, `nettest2`,
-`dhcp`, `http`, `dnscache`, `sockinfo`, `platforminfo`, `wget`, `gui`,
-`exit`, `reboot`, and `shutdown`.
+`dhcp`, `http`, `dnscache`, `sockinfo`, `platforminfo`, `hardening`,
+`polltest`, `wget`, `gui`, `exit`, `reboot`, and `shutdown`.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and

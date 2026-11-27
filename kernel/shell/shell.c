@@ -6,6 +6,8 @@
 #include "dhcp.h"
 #include "dns.h"
 #include "http.h"
+#include "kstack.h"
+#include "protect.h"
 #include "security.h"
 #include "task.h"
 #include "e1000.h"
@@ -14,6 +16,7 @@
 #include "net.h"
 #include "socket.h"
 #include "tcp.h"
+#include "syscall.h"
 #include "udp.h"
 #include "syscall.h"
 #include "fb.h"
@@ -256,6 +259,8 @@ static void command_help(void) {
     kprintf("  dnscache             report the dns cache contents and counters\n");
     kprintf("  sockinfo             report socket and transport table usage\n");
     kprintf("  platforminfo         report security, kaslr and task model state\n");
+    kprintf("  hardening            report guard pages, canary, nx and w^x state\n");
+    kprintf("  polltest             exercise udp poll readability and timeout\n");
     kprintf("  wget [port]          run the ring 3 http download tool\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
@@ -1260,6 +1265,39 @@ static void command_platforminfo(void) {
             socket_count(), udp_socket_count(), tcp_connection_count());
 }
 
+static void command_hardening(void) {
+    extern u64 __stack_chk_guard;
+    kprintf("hardening nx: %s w^x: %s canary: %s\n",
+            security_nx_active() ? "on" : "off",
+            kernel_protect_active() ? "on" : "off",
+            __stack_chk_guard != 0 ? "on" : "off");
+    kprintf("hardening protected pages: %u\n", kernel_protected_pages());
+    kprintf("hardening kernel stacks used: %llu of %llu\n",
+            (unsigned long long)kstack_used(), (unsigned long long)kstack_total());
+}
+
+static void command_polltest(void) {
+    int listener = socket_create(SOCKET_AF_INET, SOCKET_SOCK_DGRAM, 0);
+    if (listener <= 0 || socket_bind(listener, 0, 4970) != 0) {
+        kprintf("polltest: socket setup failed\n");
+        if (listener > 0) {
+            socket_close(listener);
+        }
+        return;
+    }
+    struct pollfd_user local[1];
+    local[0].fd = listener;
+    local[0].events = SOCKET_POLLIN;
+    local[0].revents = 0;
+    u64 ready = syscall_poll_register(&local[0], 1, 50);
+    kprintf("polltest: idle ready %llu\n", ready);
+    udp_inject_datagram(4970, NET_IPV4(10, 0, 2, 2), 8100, "poll", 4);
+    local[0].revents = 0;
+    ready = syscall_poll_register(&local[0], 1, 500);
+    kprintf("polltest: readable %llu revents %u\n", ready, local[0].revents);
+    socket_close(listener);
+}
+
 static void command_wget(int argc, char *arguments[]) {
     if (argc >= 2) {
         u32 port = parse_decimal(arguments[1], 0);
@@ -1661,6 +1699,10 @@ static void execute_command(int argc, char *arguments[]) {
         command_sockinfo();
     } else if (strcmp(command, "platforminfo") == 0) {
         command_platforminfo();
+    } else if (strcmp(command, "hardening") == 0) {
+        command_hardening();
+    } else if (strcmp(command, "polltest") == 0) {
+        command_polltest();
     } else if (strcmp(command, "wget") == 0) {
         command_wget(argc, arguments);
     } else if (strcmp(command, "gui") == 0) {

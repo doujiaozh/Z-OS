@@ -28,6 +28,7 @@ CFLAGS = [
     "-mno-mmx",
     "-mno-sse",
     "-mno-sse2",
+    "-fstack-protector-strong",
     "-Wall",
     "-Wextra",
     "-Wno-unused-parameter",

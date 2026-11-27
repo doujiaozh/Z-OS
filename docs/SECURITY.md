@@ -3,7 +3,7 @@
 ## Scope
 
 This document describes the security properties and known weaknesses of Z-OS
-1.0.0 Platform. It is deliberately conservative. The system is a development
+1.1.0 Hardening. It is deliberately conservative. The system is a development
 prototype and must not be used to protect sensitive data.
 
 ## Implemented boundaries
@@ -113,6 +113,13 @@ prototype and must not be used to protect sensitive data.
   validation.
 - Heap layout is randomized per boot inside the reserved heap window using
   timestamp entropy, so kernel object addresses are not fixed.
+- Kernel thread and process stacks are allocated with an unmapped guard page
+  below them, and stack pages are non executable.
+- The build enables stack protector strong; the guard is seeded from boot
+  entropy and a corrupted canary panics.
+- EFER.NXE is enabled when supported, CR0.WP is set, kernel text and read-only
+  data are mapped read only, and kernel data, heap and stack pages are mapped
+  non executable.
 - Select and non-blocking socket operations validate descriptor bits and cap
   transfer sizes before touching buffers.
 - Physical frames returned by the allocator are zeroed, so ELF BSS bytes are
@@ -130,6 +137,17 @@ shared across processes. Two processes loading the same ELF therefore receive
 different physical pages at the same virtual addresses.
 
 Platform hardening is not yet a security boundary:
+
+- Kernel page table isolation is not implemented: the kernel data, heap and
+  direct map remain visible in the user mode page table, so user mode can read
+  kernel memory through Spectre style side channels and a kernel write primitive
+  would have full access.
+- W^X is partial: the page containing the text to data boundary remains
+  writable and executable, and identity mapped physical memory used by the
+  allocator remains executable.
+- Guard pages detect overflows only when the fault is taken, and a stack
+  overflow still panics the kernel rather than terminating a task; there is no
+  per-task recoverable fault handling.
 
 - The AC window used for user copies is coarse; a bug inside VFS or console
   code running inside that window would bypass SMAP.
@@ -355,8 +373,9 @@ process reaping, and exception containment are implemented and tested.
 
 ## Hardening priorities
 
-1. Platform hardening: guard pages for kernel stacks, stack canaries, KPTI,
-   NX enforcement, W^X kernel mappings and full KASLR.
+1. Implement KPTI with a restricted user page table, entry trampolines and CR3
+   switching on syscall and interrupt return, plus full kernel image KASLR,
+   boundary page separation for complete W^X and shadow stacks.
 2. TCP hardening: SYN backlog limits and randomized initial sequence numbers
    from an entropy source.
 3. DNS response validation by source address, cache keyed by server, and

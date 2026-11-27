@@ -9,7 +9,7 @@ claimed by a small prototype. The useful goal is a staged, testable path from
 a real kernel foundation to a general-purpose operating system, with explicit
 scope and acceptance criteria at each stage.
 
-Z-OS 1.0.0 is the Platform stage. It boots, manages memory, runs
+Z-OS 1.1.0 is the Hardening stage. It boots, manages memory, runs
 preemptive kernel threads, hosts a VFS, ATA storage and shell, schedules Ring 3
 ELF64 processes, implements POSIX primitives, and adds an ATA PIO block driver
 with the persistent Z-OS filesystem mounted at /disk. The graphics stack now
@@ -48,7 +48,8 @@ network, TCP, internet, platform, desktop, buffering and VGA restore tests.
 | DHCP client, cached DNS, HTTP client, socket ownership | Implemented and verified | v0.9.0-internet |
 | POSIX select, non-blocking sockets, libc network API, user wget | Implemented and verified | v1.0.0-platform |
 | SMEP, SMAP and heap KASLR | Implemented and verified | v1.0.0-platform |
-| Guard pages, stack canaries, KPTI, full KASLR, TLS | Planned, next | v1.1.0-hardening |
+| Guard pages, stack canaries, NX, W^X, poll | Implemented and verified | v1.1.0-hardening |
+| KPTI, full image KASLR, shadow stacks, TLS | Planned, next | v1.2.0-isolation |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
@@ -58,7 +59,7 @@ claimed as complete.
 
 ## Capability matrix
 
-| Domain | 1.0.0 Platform | Needed for general purpose |
+| Domain | 1.1.0 Hardening | Needed for general purpose |
 | --- | --- | --- |
 | Boot | BIOS two-stage, E820, long mode | UEFI, GPT, secure boot, ACPI handoff, multiboot protocol |
 | CPU | GDT, TSS, IDT, exceptions, PIC, PIT | SMP, local APIC, IOAPIC, HPET, TSC deadline, CPU hotplug |
@@ -74,7 +75,7 @@ claimed as complete.
 | Devices | PIT, PIC, PS/2, COM1, CMOS | PCI enumeration, interrupt routing, USB, audio, timers, hotplug |
 | ABI | Twenty-six custom syscalls | POSIX/Linux ABI, libc, PE/Win32, Mach-O, dynamic linking |
 | Userland | Kernel shell and one static ELF64 program | init, coreutils, shell, package manager, installer, GUI |
-| Reliability | 379 boot tests, storage, network, tcp, internet, platform, desktop checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
+| Reliability | 402 boot tests, storage, network, tcp, internet, platform, hardening checks | Stress, fuzzing, crash dumps, watchdog, recovery, updates |
 | Hardware | QEMU PC reference | Broad chipsets, laptops, servers, virtual machines, ARM64 |
 
 ## Milestone 0.2: foundation hardening
@@ -108,16 +109,15 @@ Acceptance criteria:
 Goal: move from a static ELF user program to a kernel capable of hosting
 independent processes.
 
-v1.0.0-platform delivered SMEP and SMAP enabling with AC scoped user memory
-copies, heap address space layout randomization inside the shared heap window,
-a unified task descriptor shared by kernel threads and user processes, POSIX
-style select and non-blocking socket semantics with readiness polling, a user C
-library network interface, the ring 3 wget tool that saves a HTTP body through
-the file system, the platforminfo and wget shell commands, and a platform
-verification stage that asserts the security flags, KASLR, select readiness and
-the user space download. The remaining items below move hardening toward guard
-pages, stack canaries, full KASLR and KPTI, networking toward TLS, storage
-toward a real disk filesystem, and the desktop toward a user-space compositor.
+v1.1.0-hardening delivered guarded kernel stacks with unmapped guard pages,
+stack canaries with boot entropy seeding and panic on corruption, EFER.NXE and
+CR0.WP, a kernel image split into read-only executable text and writable non
+executable data with non executable heap and stack mappings, the hardening and
+polltest shell commands, and 23 new self-test checks. Kernel page table
+isolation was designed and audited but not implemented in this milestone; the
+restricted user page table, entry trampolines and CR3 switching on every
+syscall and interrupt return remain the first item of the next milestone, which
+also covers full image KASLR, shadow stacks and transport security.
 
 - Parse ACPI MADT, FADT, and MCFG tables.
 - Program the local APIC, IOAPIC, and HPET; retire the PIC and PIT.
@@ -320,8 +320,8 @@ and macOS" unless independent application and hardware test suites pass.
 
 ## Immediate next steps
 
-1. Add comprehensive hardening: guard pages, stack canaries, KPTI, full kernel
-   and user space KASLR, and NX enforcement on data pages.
+1. Add KPTI with entry trampolines and audited return paths, full kernel image
+   KASLR, shadow stack and boundary page separation for W^X.
 2. Add TLS style transport security and a certificate store.
 3. Replace polled ATA with DMA, add partitions, journaling and checksums.
 4. Move the desktop to a user-space compositor client with damage tracking.

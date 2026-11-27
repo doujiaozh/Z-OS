@@ -10,6 +10,15 @@ typedef unsigned int u32;
 #define SOCK_STREAM 1
 #define SOCK_DGRAM 2
 #define SOL_SOCKET 1
+#define POLLIN 0x0001
+#define POLLOUT 0x0004
+#define POLLERR 0x0008
+
+struct pollfd {
+    int fd;
+    unsigned short events;
+    unsigned short revents;
+};
 
 struct sockaddr_in {
     u16 sin_family;
@@ -78,6 +87,10 @@ static inline int net_select(int max_descriptor, unsigned long *read_mask,
 
 static inline int net_nonblocking(int descriptor, int enabled) {
     return (int)zset_nonblocking((long)descriptor, (long)enabled);
+}
+
+static inline int net_poll(struct pollfd *fds, int count, int timeout_ms) {
+    return (int)zpoll(fds, (long)count, (long)timeout_ms);
 }
 
 static inline int net_close(int descriptor) {

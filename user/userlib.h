@@ -58,6 +58,7 @@ struct mouse_user_state {
 #define ZO_SYS_GET_TEST_PORT 37
 #define ZO_SYS_SELECT 38
 #define ZO_SYS_SET_NONBLOCKING 39
+#define ZO_SYS_POLL 40
 #define ZO_EAGAIN 11
 
 static inline long zsys3(long number, long first, long second, long third) {
@@ -245,6 +246,11 @@ static inline long zselect(unsigned long read_mask, unsigned long write_mask,
 {
     return zsys5(ZO_SYS_SELECT, (long)read_mask, (long)write_mask, (long)timeout_ms,
                  (long)ready_read, (long)ready_write);
+}
+
+static inline long zpoll(void *fds, long count, long timeout_ms)
+{
+    return zsys3(ZO_SYS_POLL, (long)fds, count, timeout_ms);
 }
 
 static inline long zset_nonblocking(long descriptor, long enabled)

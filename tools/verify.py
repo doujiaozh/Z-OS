@@ -98,7 +98,7 @@ def run_selftest():
     print(log)
     if exit_code != QEMU_SUCCESS:
         raise CheckFailure("self-test QEMU exit code " + str(exit_code) + " expected " + str(QEMU_SUCCESS))
-    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=379 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
+    check_log(log, ["ZTEST BEGIN", "ZTEST SUMMARY passed=402 failed=0", "ZTEST RESULT PASS"], ["[FAIL]", "PANIC", "EXCEPTION"])
     print("self-test PASS")
 
 
@@ -1422,6 +1422,9 @@ def run_platform():
 
         run_command("platforminfo", ["smep: on", "smap: on",
                                      "kaslr enabled: yes", "tasks:"])
+        run_command("hardening", ["nx: on", "w^x: on", "canary: on",
+                                  "protected pages:", "kernel stacks used:"])
+        run_command("polltest", ["polltest: idle ready 0", "polltest: readable 1"])
         run_command("wget " + str(http_port), ["wget: saved body", "wget: exit status 0"],
                     timeout=90)
         if not http_requests or b"GET /index.html HTTP/1.0" not in http_requests[0]:

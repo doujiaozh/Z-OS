@@ -5,7 +5,7 @@
 | Item | Value |
 | --- | --- |
 | Date | 2026-11-25 |
-| Version | 1.0.0 Platform |
+| Version | 1.1.0 Hardening |
 | Host | Windows, x86_64 |
 | Emulator | QEMU 7.0.0 |
 | Machine | Default `pc`, SeaBIOS |
@@ -65,7 +65,7 @@ exit device. A successful run returns host exit status 33, which is
 Verified output ends with:
 
 ```text
-ZTEST SUMMARY passed=379 failed=0
+ZTEST SUMMARY passed=402 failed=0
 ZTEST RESULT PASS
 ```
 
@@ -92,6 +92,13 @@ CPU capability, CR4 bits, heap KASLR bounds, alignment and slot derivation,
 unified task descriptor initialisation, counters, state, quantum and kind
 naming, select timeout, readable and writable readiness, descriptor mask
 bounds, non-blocking EAGAIN behaviour and socket reclamation.
+A further milestone added 23 checks covering guarded stack allocation, guard
+page mapping state, non executable stack pages, stack free behaviour, distinct
+guarded slots, canary initialisation and symbol consistency, NX activation,
+kernel section protection, read only executable text flags, writable non
+executable data flags, CR0 write protect, non executable heap pages, stack
+window placement, and poll timeout, readable, writable, negative descriptor,
+all idle and invalid descriptor behaviour.
 A further milestone added 14 checks
 covering double buffer allocation, partial and full frame presentation, dirty
 rectangle merging, VGA CRTC timing readback, sequencer clocking readback,
@@ -144,6 +151,7 @@ Test coverage by area:
 | Transport | TCP checksum, header parse, sequence comparison, window clamp, listen, SYN, handshake, accept, receive, FIN, close, checksum rejection, reset, DNS query build, DNS answer parse |
 | Internet | DHCP discover and request, offer parse, lease apply, DNS cache insert, lookup, negative, expiry, warm resolve, HTTP status, content length, errors, truncation, URL parse, socket ownership and cleanup |
 | Platform | SMEP and SMAP activation, CR4 bits, heap KASLR bounds, task base init, counters, state, quantum, select timeout, readable, writable, mask bounds, non-blocking EAGAIN, socket reclamation |
+| Hardening | Guard stack allocation and mapping, guard unmapped, stack NX, stack free, distinct slots, canary init and symbol, NX active, section protection, text flags, data flags, CR0 WP, heap NX, stack window, poll timeout, readable, writable, negative descriptor, all idle, invalid descriptor |
 | Compositor | Initialize, layer add, present, draw order, z-order, flush callback, damage records, damage clear, layer removal, output refresh, drain |
 | POSIX programs | postest exit status, descriptor marks, timeout mark, signal marks, failure marker, reaping |
 | User graphics 2 | guitest2 exit status, font pixels in framebuffer, title bar, accent rectangle, text mode restore |
@@ -367,4 +375,4 @@ rebuilds first unless `--skip-build` is supplied.
 - Real NX, SMEP, SMAP, KASLR, or ASLR behavior.
 
 Those items are tracked in [ROADMAP.md](ROADMAP.md) and are not implied by a
-passing 1.0.0 test run.
+passing 1.1.0 test run.

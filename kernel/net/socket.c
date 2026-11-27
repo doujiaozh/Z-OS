@@ -382,3 +382,22 @@ u32 socket_select(u32 read_mask, u32 write_mask, u32 timeout_ms,
     }
     return 0;
 }
+
+u32 socket_events(int descriptor) {
+    u32 events = 0;
+    if (!socket_valid(descriptor)) {
+        return SOCKET_POLLERR;
+    }
+    if (socket_read_ready(descriptor)) {
+        events |= SOCKET_POLLIN;
+    }
+    if (socket_write_ready(descriptor)) {
+        events |= SOCKET_POLLOUT;
+    }
+    return events;
+}
+
+u32 socket_poll_events(u32 fd, u32 events) {
+    u32 available = socket_events((int)fd);
+    return available & (events | SOCKET_POLLERR);
+}

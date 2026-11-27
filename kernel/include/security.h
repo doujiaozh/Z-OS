@@ -13,6 +13,11 @@ bool security_smep_active(void);
 bool security_smap_active(void);
 u64 security_entropy(void);
 u64 security_random(void);
+void __stack_chk_fail(void);
+void security_init_canary(void);
+u64 security_canary(void);
+bool security_nx_supported(void);
+bool security_nx_active(void);
 void security_stac(void);
 void security_clac(void);
 

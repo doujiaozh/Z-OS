@@ -13,6 +13,7 @@
 #define PTE_HUGE 0x080ULL
 #define PTE_GLOBAL 0x100ULL
 #define PTE_ADDRESS 0x000FFFFFFFFFF000ULL
+#define PTE_NO_EXECUTE 0x8000000000000000ULL
 
 #define KERNEL_HIGH_BASE 0xFFFFFFFF80000000ULL
 #define KERNEL_HIGH_LIMIT 0xFFFFFFFFC0000000ULL
@@ -23,7 +24,7 @@
 #define VMM_USER_STACK_BASE 0x40010000ULL
 #define VMM_USER_STACK_TOP 0x40010FF8ULL
 #define VMM_HEAP_FIRST_PD 256
-#define VMM_HEAP_PD_COUNT 4
+#define VMM_HEAP_PD_COUNT 8
 
 struct address_space {
     u64 pml4_phys;
@@ -40,6 +41,7 @@ int vmm_map_page(u64 virtual_address, u64 physical_address, u64 flags);
 int vmm_map_range(u64 virtual_address, u64 physical_address, u64 page_count, u64 flags);
 int vmm_unmap_page(u64 virtual_address);
 u64 vmm_get_physical(u64 virtual_address);
+u64 vmm_query_flags(u64 virtual_address);
 bool vmm_is_mapped(u64 virtual_address);
 bool vmm_user_range_valid(u64 address, u64 length);
 int vmm_create_address_space(struct address_space *space);

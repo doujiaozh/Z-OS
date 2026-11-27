@@ -77,7 +77,8 @@ void heap_init(void) {
         if (frame == 0) {
             panic("out of physical memory while building kernel heap");
         }
-        if (vmm_map_page(heap_base_address + offset, frame, PTE_PRESENT | PTE_WRITABLE) != 0) {
+        if (vmm_map_page(heap_base_address + offset, frame,
+                         PTE_PRESENT | PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
             panic("failed to map kernel heap page");
         }
     }

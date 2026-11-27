@@ -19,6 +19,7 @@ SECTIONS
 
     .data : ALIGN(16)
     {
+        __data_start = .;
         *(.data .data.*)
     }
 
