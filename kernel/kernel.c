@@ -30,6 +30,7 @@
 #include "vmm.h"
 #include "wm.h"
 #include "zfs.h"
+#include "zdisk.h"
 #include "fb.h"
 
 void kmain(struct boot_info *boot) {
@@ -72,6 +73,7 @@ void kmain(struct boot_info *boot) {
     } else {
         kprintf("ATA: no primary master device\n");
     }
+    zdisk_init();
     net_init();
     if (net_ready()) {
         char mac_text[24];

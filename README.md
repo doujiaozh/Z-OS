@@ -406,6 +406,48 @@ control blocks.
 Line editing supports backspace, Ctrl+C, and Ctrl+L. Arrow keys are decoded
 for the shell but history navigation is not implemented yet.
 
+## Hard disk boot and large file loading
+
+The 1.44 MB floppy image remains the default verification target. A second
+boot path boots the kernel from a 512 MB IDE disk so that large payloads can
+be stored outside the kernel image.
+
+- boot/stage1.asm writes an MBR with a 0xDA partition entry covering LBA 2048
+  through the end of the disk. When the BIOS boot drive is 0x80 and INT 13h
+  extensions are present, the loader reads stage2 with the disk address
+  packet instead of CHS addressing. Floppy boot keeps the original path.
+- boot/stage2.asm copies the kernel from a BIOS staging buffer on floppy boot.
+  On disk boot it enters protected mode and reads the kernel directly from
+  LBA 33 with ATA PIO, avoiding any real mode staging buffer.
+- kernel/drivers/ata.c issues IDENTIFY to read the LBA48 capacity, uses the
+  0x24 and 0x34 EXT commands, transfers up to 128 sectors per command and moves
+  data with `rep insw` and `rep outsw`.
+- kernel/fs/zdisk.c mounts the ZDISK partition, lists its directory, and loads
+  a file into one contiguous physical run so the caller can read it linearly.
+- tools/mkdisk.py converts assets/model.bin to FP16 and writes a 512 MB
+  build/../disk/hd.img containing the partition, the directory, the weights
+  and a small text file.
+
+Build and run:
+
+```powershell
+python tools/mkdisk.py
+qemu-system-x86_64 -drive format=raw,file=disk/hd.img,if=ide,index=0,media=disk -boot c -m 256M -cpu max -display none -serial stdio
+```
+
+Inside the shell:
+
+```text
+diskinfo
+hdload NOTE.TXT
+hdload WEIGHTS.BIN
+```
+
+`hdload` prints the byte count, elapsed milliseconds, transfer rate, the first
+eight bytes of the payload, the TGPTBIN1 header fields and an FNV-1a checksum.
+The reference checksum of the converted FP16 weights is b2615498d2e5f7a3 over
+163828864 bytes.
+
 ## Repository layout
 
 ```text

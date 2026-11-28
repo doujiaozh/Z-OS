@@ -16,9 +16,25 @@ start:
     mov ss, ax
     mov sp, 0x7C00
     mov [boot_drive], dl
+    mov byte [use_ata], 0
+    cmp dl, 0x80
+    jb .bios_only
+    mov ah, 0x41
+    mov bx, 0x55AA
+    int 0x13
+    jc .bios_only
+    cmp bx, 0xAA55
+    jne .bios_only
+    test cx, 1
+    jz .bios_only
+    mov byte [use_ata], 1
+.bios_only:
     call enable_a20
     call probe_memory
-    call load_kernel
+    cmp byte [use_ata], 0
+    jne .skip_stage
+    call load_kernel_bios
+.skip_stage:
     mov ax, 0x0003
     int 0x10
     call enter_protected
@@ -69,7 +85,7 @@ probe_memory:
     mov dword [BOOTINFO + 12], 1
     ret
 
-load_kernel:
+load_kernel_bios:
     mov word [sector_index], 0
 .read_one:
     movzx eax, word [sector_index]
@@ -150,11 +166,17 @@ protected_entry:
     mov ss, ax
     mov esp, 0x90000
 
+    cmp byte [use_ata], 0
+    jne .ata_path
     mov esi, STAGING
     mov edi, KERNEL_ENTRY
     mov ecx, KERNEL_SECTORS * 512
     rep movsb
-
+    jmp .loaded
+.ata_path:
+    call ata_load_kernel
+.loaded:
+    call check_long_mode
     mov edi, 0x1000
     xor eax, eax
     mov ecx, 0x3000 / 4
@@ -170,7 +192,6 @@ protected_entry:
     add edi, 8
     loop .map
 
-    call check_long_mode
     call validate_paging
     mov eax, cr4
     or eax, 0x20
@@ -185,7 +206,7 @@ protected_entry:
     mov ecx, 0xC0000080
     rdmsr
     test eax, 0x100
-    jz long_mode_error
+    jz .long_error
     mov eax, 0x1000
     mov cr3, eax
     mov eax, cr0
@@ -195,10 +216,93 @@ protected_entry:
     mov cr3, eax
     jmp 0x18:long_entry
 .pae_error:
-    mov bl, '7'
-    mov esi, long_mode_error_text
-    mov ecx, long_mode_error_text_length
-    jmp report_error
+    mov al, '7'
+    call pm_halt_char
+.long_error:
+    mov al, '6'
+    call pm_halt_char
+
+ata_load_kernel:
+    pushad
+    mov dword [ata_lba], KERNEL_LBA
+    mov dword [ata_target], KERNEL_ENTRY
+    mov dword [ata_remaining], KERNEL_SECTORS
+.sector_loop:
+    cmp dword [ata_remaining], 0
+    je .done
+    mov edx, 0x1F6
+    mov eax, [ata_lba]
+    shr eax, 24
+    and al, 0x0F
+    or al, 0xE0
+    out dx, al
+    mov dx, 0x3F6
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
+    mov edx, 0x1F2
+    mov al, 1
+    out dx, al
+    mov eax, [ata_lba]
+    mov edx, 0x1F3
+    out dx, al
+    shr eax, 8
+    inc dx
+    out dx, al
+    shr eax, 8
+    inc dx
+    out dx, al
+    mov dx, 0x1F7
+    mov al, 0x20
+    out dx, al
+.wait:
+    in al, dx
+    test al, 0x80
+    jnz .wait
+    test al, 0x21
+    jnz .error
+    test al, 0x08
+    jz .wait
+    mov edi, [ata_target]
+    mov ecx, 256
+    mov dx, 0x1F0
+    rep insw
+    add dword [ata_target], 512
+    inc dword [ata_lba]
+    dec dword [ata_remaining]
+    jmp .sector_loop
+.error:
+    mov al, 'A'
+    call pm_halt_char
+.done:
+    popad
+    ret
+
+ata_wait:
+    mov dx, 0x3F6
+    in al, dx
+    in al, dx
+    in al, dx
+    in al, dx
+    mov dx, 0x1F7
+.wait:
+    in al, dx
+    test al, 0x80
+    jnz .wait
+    ret
+
+pm_halt_char:
+    push eax
+    mov edi, 0xB8000
+    mov [edi], al
+    mov al, 0x0F
+    mov [edi + 1], al
+    pop eax
+.halt:
+    cli
+    hlt
+    jmp .halt
 
 check_long_mode:
     mov eax, 0x80000000
@@ -211,10 +315,8 @@ check_long_mode:
     jz .unsupported
     ret
 .unsupported:
-    mov bl, '6'
-    mov esi, long_mode_error_text
-    mov ecx, long_mode_error_text_length
-    jmp report_error
+    mov al, '6'
+    call pm_halt_char
 
 validate_paging:
     mov edi, 0x1000
@@ -232,88 +334,33 @@ validate_paging:
     mov eax, [0x2000]
     cmp eax, 0x00003003
     jne .directory_pointer_error
-    mov eax, [0x3000]
-    cmp eax, 0x00000083
-    jne .directory_error
-    mov eax, [0x3008]
-    cmp eax, 0x00200083
-    jne .page_error
     ret
 .table_error:
-    mov bl, '1'
-    jmp paging_error
+    mov al, '4'
+    call pm_halt_char
 .directory_pointer_error:
-    mov bl, '2'
-    jmp paging_error
+    mov al, '5'
+    call pm_halt_char
 .directory_error:
-    mov bl, '3'
-    jmp paging_error
-.page_error:
-    mov bl, '4'
-    jmp paging_error
-
-long_mode_error:
-    mov bl, '5'
-    mov esi, long_mode_error_text
-    mov ecx, long_mode_error_text_length
-    jmp report_error
-
-paging_error:
-    mov esi, paging_error_text
-    mov ecx, paging_error_text_length
-report_error:
-    mov edi, 0xB8000
-    mov ah, 0x4F
-.copy_text:
-    lodsb
-    stosw
-    loop .copy_text
-    mov al, bl
-    stosw
-    add edi, 2
-    mov al, 'H'
-    stosw
-    mov al, 'A'
-    stosw
-    mov al, 'L'
-    stosw
-    mov al, 'T'
-    stosw
-.halt:
-    cli
-    hlt
-    jmp .halt
-
+    mov al, '3'
+    call pm_halt_char
 
 BITS 64
 long_entry:
-    mov ax, 0x20
+    mov ax, 0x10
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov rsp, 0x90000
-    xor rbp, rbp
-    mov rdi, BOOTINFO
+    mov rax, 0x90000
+    mov rsp, rax
     mov rax, KERNEL_ENTRY
+    mov rdi, BOOTINFO
+    xor rbp, rbp
     jmp rax
 
 BITS 16
-boot_drive db 0
-sector db 0
-head db 0
-cylinder db 0
-retries db 0
-sector_index dw 0
-e820_count db 0
-disk_message db "Z-OS stage2 disk error", 13, 10, 0
-paging_error_text db "Z-OS STAGE2 PAGING ERROR "
-paging_error_text_length equ $ - paging_error_text
-long_mode_error_text db "Z-OS STAGE2 LONG MODE ERROR "
-long_mode_error_text_length equ $ - long_mode_error_text
-
-align 8
 gdt_start:
     dq 0
     dq 0x00CF9A000000FFFF
@@ -321,8 +368,23 @@ gdt_start:
     dq 0x00AF9A000000FFFF
     dq 0x00CF92000000FFFF
 gdt_end:
+
 gdt_descriptor:
     dw gdt_end - gdt_start - 1
     dd gdt_start
 
-times 32 * 512 - ($ - $$) db 0
+disk_message db "Z-OS stage2 disk error", 13, 10, 0
+boot_drive db 0
+use_ata db 0
+e820_count db 0
+sector_index dw 0
+sector db 0
+cylinder db 0
+head db 0
+retries db 0
+align 4
+ata_lba dd 0
+ata_target dd 0
+ata_remaining dd 0
+
+times 16384 - ($ - $$) db 0

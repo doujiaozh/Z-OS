@@ -40,6 +40,7 @@
 #include "vfs.h"
 #include "wm.h"
 #include "zfs.h"
+#include "zdisk.h"
 
 #define SHELL_LINE_MAX 256
 #define SHELL_ARG_MAX 16
@@ -235,6 +236,7 @@ static void command_help(void) {
     kprintf("  guitest2             run the font, mouse and compositor test program\n");
     kprintf("  gfx [demo|test|off]  framebuffer, gfx and window manager control\n");
     kprintf("  diskinfo             ata block device and zfs status\n");
+    kprintf("  hdload [name]        load a zdisk file into physical memory\n");
     kprintf("  format               format the ata disk with zfs\n");
     kprintf("  zmount               mount zfs and populate /disk\n");
     kprintf("  zls                  list zfs files on disk\n");
@@ -1359,8 +1361,67 @@ static void command_diskinfo(void) {
         kprintf("ata sectors: %u (%u KiB)\n", ata_sector_count(), ata_sector_count() / 2);
     }
     kprintf("zfs mounted: %s, files: %u\n", zfs_mounted() ? "yes" : "no", zfs_file_count());
+    kprintf("zdisk mounted: %s, files: %u\n", zdisk_mounted() ? "yes" : "no", zdisk_file_count());
+    if (zdisk_mounted()) {
+        kprintf("zdisk partition: lba %llu, %llu sectors\n", zdisk_part_lba(), zdisk_part_sectors());
+        for (u32 index = 0; index < zdisk_file_count(); index++) {
+            const struct zdisk_file *entry = zdisk_lookup_index(index);
+            if (entry != NULL) {
+                kprintf("zdisk file: %s %llu bytes\n", entry->name, entry->size);
+            }
+        }
+    }
     struct vfs_node *disk = vfs_lookup(vfs_root(), "/disk");
     kprintf("vfs /disk: %s\n", disk != NULL ? "present" : "absent");
+}
+
+static void command_hdload(int argc, char *arguments[]) {
+    if (!zdisk_mounted()) {
+        kprintf("hdload: disk not mounted\n");
+        return;
+    }
+    const char *name = argc > 1 ? arguments[1] : "WEIGHTS.BIN";
+    const struct zdisk_file *file = zdisk_lookup(name);
+    if (file == NULL) {
+        kprintf("hdload: %s not found\n", name);
+        return;
+    }
+    u64 start = timer_uptime_ms();
+    void *buffer = NULL;
+    u64 size = 0;
+    int result = zdisk_load(name, &buffer, &size);
+    u64 elapsed = timer_uptime_ms() - start;
+    if (result != ZDISK_ERROR_NONE) {
+        kprintf("hdload: %s failed (%s)\n", name, zdisk_error_text(result));
+        return;
+    }
+    u8 *data = (u8 *)buffer;
+    u32 magic = 0;
+    u32 version = 0;
+    u32 layers = 0;
+    u32 heads = 0;
+    u32 embd = 0;
+    memcpy(&magic, data, 4);
+    memcpy(&version, data + 8, 4);
+    memcpy(&layers, data + 12, 4);
+    memcpy(&heads, data + 16, 4);
+    memcpy(&embd, data + 20, 4);
+    u64 kib = size / 1024;
+    u64 kib_per_second = 0;
+    if (elapsed > 0) {
+        kib_per_second = kib * 1000 / elapsed;
+    }
+    u64 checksum = 0xCBF29CE484222325ULL;
+    for (u64 index = 0; index < size; index++) {
+        checksum ^= data[index];
+        checksum *= 0x100000001B3ULL;
+    }
+    kprintf("hdload: %s %llu bytes (%llu KiB) in %llu ms (%llu KiB/s)\n", name, size, kib, elapsed,
+            kib_per_second);
+    kprintf("hdload: head %02x %02x %02x %02x %02x %02x %02x %02x, magic %08x version %u layers %u heads %u embd %u\n",
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7], magic, version,
+            layers, heads, embd);
+    kprintf("hdload: fnv1a %016llx\n", checksum);
 }
 
 static void command_format(void) {
@@ -1663,6 +1724,8 @@ static void execute_command(int argc, char *arguments[]) {
         command_gfx(argc, arguments);
     } else if (strcmp(command, "diskinfo") == 0) {
         command_diskinfo();
+    } else if (strcmp(command, "hdload") == 0) {
+        command_hdload(argc, arguments);
     } else if (strcmp(command, "format") == 0) {
         command_format();
     } else if (strcmp(command, "zmount") == 0) {
