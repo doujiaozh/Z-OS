@@ -262,6 +262,7 @@ static void command_help(void) {
     kprintf("  hardening            report guard pages, canary, nx and w^x state\n");
     kprintf("  polltest             exercise udp poll readability and timeout\n");
     kprintf("  wget [port]          run the ring 3 http download tool\n");
+    kprintf("  dbclient [port]      query the host MiniDB server over RESP2\n");
     kprintf("  reboot               reset the machine\n");
     kprintf("  shutdown             power off or halt\n");
 }
@@ -1299,6 +1300,26 @@ static void command_polltest(void) {
     socket_close(listener);
 }
 
+static void command_dbclient(int argc, char *arguments[]) {
+    u32 port = 6379;
+    if (argc >= 2) {
+        u32 requested = parse_decimal(arguments[1], 0);
+        if (requested == 0 || requested >= 65535) {
+            kprintf("dbclient: invalid port\n");
+            return;
+        }
+        port = requested;
+    }
+    syscall_set_test_port(port);
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_single_program("dbclient", user_dbclient_start, user_dbclient_end, &status);
+    if (pid == 0) {
+        kprintf("dbclient: program failed to run\n");
+        return;
+    }
+    kprintf("dbclient: exit status %llu\n", status);
+}
+
 static void command_wget(int argc, char *arguments[]) {
     if (argc >= 2) {
         u32 port = parse_decimal(arguments[1], 0);
@@ -1706,6 +1727,8 @@ static void execute_command(int argc, char *arguments[]) {
         command_polltest();
     } else if (strcmp(command, "wget") == 0) {
         command_wget(argc, arguments);
+    } else if (strcmp(command, "dbclient") == 0) {
+        command_dbclient(argc, arguments);
     } else if (strcmp(command, "gui") == 0) {
         command_gui();
     } else if (strcmp(command, "exit") == 0) {

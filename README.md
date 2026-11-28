@@ -176,6 +176,7 @@ python tools/verify.py smoke
 python tools/verify.py bootcheck
 python tools/verify.py keyboard
 python tools/verify.py shell
+python tools/verify.py minidb
 ```
 
 The self-test image runs 441 in-kernel checks covering physical memory,
@@ -392,7 +393,12 @@ The shell supports `help`, `about`, `version`, `uname`, `clear`, `echo`,
 `zls`, `zsave`, `zcat`, `zrm`, `zsync`, `mouse`, `netinfo`, `arp`, `ping`,
 `udp-echo`, `dnsserver`, `dnsport`, `dns`, `tcptest`, `tcplisten`, `nettest2`,
 `dhcp`, `http`, `dnscache`, `sockinfo`, `platforminfo`, `hardening`,
-`polltest`, `wget`, `gui`, `exit`, `reboot`, and `shutdown`.
+`polltest`, `wget`, `dbclient`, `gui`, `exit`, `reboot`, and `shutdown`.
+
+`dbclient` runs a ring-3 RESP2 client that connects to a MiniDB server on the
+host at 10.0.2.2:6379, writes `zos:minidb:write`, reads the seeded
+`zos:minidb:key` bulk string, and prints both values in the shell. An optional
+port argument overrides the default port.
 
 `usertest` runs the ring-3 program as a scheduled process. `schedtest` runs two
 processes under time slicing. `forktest` exercises fork continuation and

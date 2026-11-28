@@ -1349,6 +1349,191 @@ def run_internet():
                 process.wait()
 
 
+def find_minidb_server():
+    candidates = [
+        os.environ.get("MINIDB_SERVER", ""),
+        str(ROOT.parent / "MiniDB" / "build" / "minidb_server.exe"),
+        r"D:\Code\MiniDB\build\minidb_server.exe",
+    ]
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return candidate
+    raise CheckFailure("minidb_server.exe was not found, set MINIDB_SERVER")
+
+
+def encode_resp(parts):
+    payload = b"*" + str(len(parts)).encode() + b"\r\n"
+    for part in parts:
+        if isinstance(part, str):
+            part = part.encode()
+        payload += b"$" + str(len(part)).encode() + b"\r\n" + part + b"\r\n"
+    return payload
+
+
+def read_resp(stream):
+    line = stream.readline()
+    if not line:
+        raise CheckFailure("minidb closed the connection")
+    if line.startswith(b"+"):
+        return line[1:-2]
+    if line.startswith(b"-"):
+        raise CheckFailure("minidb error: " + line[1:-2].decode("utf-8", "replace"))
+    if line.startswith(b":"):
+        return int(line[1:-2])
+    if line.startswith(b"$"):
+        length = int(line[1:-2])
+        if length < 0:
+            return None
+        data = stream.read(length)
+        terminator = stream.read(2)
+        if len(data) != length or terminator != b"\r\n":
+            raise CheckFailure("minidb bulk reply is truncated")
+        return data
+    raise CheckFailure("unsupported minidb reply: " + repr(line))
+
+
+def minidb_command(port, *parts):
+    with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
+        connection.sendall(encode_resp(parts))
+        stream = connection.makefile("rb")
+        try:
+            return read_resp(stream)
+        finally:
+            stream.close()
+
+
+def start_minidb(port):
+    server_path = find_minidb_server()
+    data_dir = BUILD / "minidb-data"
+    if data_dir.exists():
+        shutil.rmtree(data_dir)
+    data_dir.mkdir(parents=True, exist_ok=True)
+    log_handle = open(BUILD / "minidb-server.log", "wb")
+    process = subprocess.Popen(
+        [server_path, "--data", str(data_dir), "--port", str(port), "--threads", "8",
+         "--memtable-kb", "64", "--l0-trigger", "3", "--level-base-kb", "128",
+         "--target-kb", "128"],
+        cwd=str(Path(server_path).parent), stdout=log_handle, stderr=subprocess.STDOUT)
+    log_handle.close()
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if process.poll() is not None:
+            raise CheckFailure("minidb_server exited with code " + str(process.returncode))
+        try:
+            if minidb_command(port, "PING") == b"PONG":
+                return process
+        except (OSError, CheckFailure):
+            pass
+        time.sleep(0.1)
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+    raise CheckFailure("minidb_server did not become ready")
+
+
+def stop_minidb(process, port):
+    if process is None:
+        return
+    try:
+        if process.poll() is None:
+            minidb_command(port, "SHUTDOWN")
+    except (OSError, CheckFailure):
+        pass
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def run_minidb():
+    print("== minidb resp client test ==")
+    qemu = find_qemu()
+    serial_port = free_port()
+    minidb_port = free_port()
+    token = "zos-minidb-resp-" + str(int(time.time()))
+    write_value = b"zos-dbclient-write-ok"
+    server = None
+    process = None
+    session = None
+    try:
+        server = start_minidb(minidb_port)
+        if minidb_command(minidb_port, "SET", "zos:minidb:key", token) != b"OK":
+            raise CheckFailure("host minidb SET failed")
+        command = [qemu] + base_drive("z-os.img") + [
+            "-display", "none",
+            "-serial", "tcp:127.0.0.1:" + str(serial_port) + ",server=on,wait=off",
+            "-netdev", "user,id=n0",
+            "-device", "e1000,netdev=n0",
+        ]
+        process = subprocess.Popen(command, cwd=ROOT, stdout=subprocess.DEVNULL,
+                                   stderr=subprocess.DEVNULL)
+        connection = None
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            try:
+                connection = socket.create_connection(("127.0.0.1", serial_port), timeout=0.5)
+                break
+            except OSError:
+                if process.poll() is not None:
+                    raise CheckFailure("dbclient test QEMU exited early")
+                time.sleep(0.3)
+        if connection is None:
+            raise CheckFailure("could not connect to the dbclient serial port")
+        session = SerialSession(connection)
+        session.send_line("")
+        session.wait_for("z-os:", 20)
+
+        def run_command(command_line, expected, timeout=90):
+            start = len(session.snapshot())
+            session.send_line(command_line)
+            prompt = session.wait_for("z-os:", timeout, start + len(command_line) + 1)
+            segment = session.snapshot().decode("utf-8", errors="replace")[start:prompt]
+            for marker in expected:
+                if marker not in segment:
+                    raise CheckFailure("command '" + command_line + "' missing marker: " +
+                                       marker + "\n" + segment)
+            return segment
+
+        run_command("dhcp", ["dhcp: ip 10.0.2.15"], timeout=90)
+        run_command("dbclient " + str(minidb_port), [
+            "dbclient: connected",
+            "dbclient: set ok",
+            "dbclient: value " + token,
+            "dbclient: roundtrip zos-dbclient-write-ok",
+            "dbclient: exit status 0",
+        ], timeout=90)
+        if minidb_command(minidb_port, "GET", "zos:minidb:write") != write_value:
+            raise CheckFailure("host minidb did not observe the z-os write")
+        if minidb_command(minidb_port, "GET", "zos:minidb:key") != token.encode():
+            raise CheckFailure("host minidb lost the seeded key")
+        run_command("sockinfo", ["sockets: 0"], timeout=30)
+        session.send_line("shutdown")
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            raise CheckFailure("dbclient test did not power off")
+        print("z-os to host minidb resp2 get/set PASS")
+    finally:
+        if session is not None:
+            session.close()
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        stop_minidb(server, minidb_port)
+
+
 def run_platform():
     print("== platform security and libc test ==")
     qemu = find_qemu()
@@ -1456,7 +1641,7 @@ def run_platform():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "network", "tcp", "internet", "platform", "gui", "keyboard", "shell", "all"])
+    parser.add_argument("action", choices=["build", "test", "smoke", "bootcheck", "storage", "network", "tcp", "internet", "minidb", "platform", "gui", "keyboard", "shell", "all"])
     parser.add_argument("--skip-build", action="store_true")
     args = parser.parse_args()
     if args.action == "build":
@@ -1480,6 +1665,8 @@ def main():
         run_tcp()
     if args.action in ("internet", "all"):
         run_internet()
+    if args.action in ("minidb", "all"):
+        run_minidb()
     if args.action in ("platform", "all"):
         run_platform()
     if args.action in ("gui", "all"):
