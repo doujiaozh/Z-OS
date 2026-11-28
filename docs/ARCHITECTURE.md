@@ -1155,6 +1155,42 @@ present, unit tested and ready for the next stage, which must rework the return
 path (dedicated per-CPU entry stack plus a stub owned frame) before enabling the
 live switch.
 
+## KPTI live isolation attempt (not delivered)
+
+The v1.6.0 milestone attempted to enable live per-process CR3 switching with a
+dedicated entry stack and stub owned frames. The work was reverted after
+repeated failures; this section records what was tried and why it was not
+shipped.
+
+Approaches attempted and their observed results:
+
+- Move every IDT gate into the trampoline section so the restricted view can
+  execute entry code. This alone was harmless, but any subsequent in-place
+  switch to a per-process view during activation left the kernel stack, the
+  interrupt frame and the return stack only reachable through tables the view
+  did not contain, so returns faulted and escalated to a triple fault.
+- Add an entry stub that copies the interrupt frame from the CPU stack into a
+  kernel stack referenced by a global slot. The copy itself worked, but the
+  process kernel stack pages are allocated through the guarded stack allocator
+  and are not identity mapped, so a restricted view that maps the stack window
+  by identity resolves nothing; mapping them through the kernel tables instead
+  made the guarded stack window overlap the heap page directory entries that
+  process address spaces share, which broke the page tables used by the
+  scheduler and produced page faults inside the kernel page walk.
+- Restore plain `iretq` and remove every CR3 switch to isolate the cause. The
+  kernel still faulted, which proved the failure was introduced by the address
+  space sharing change rather than by the trampoline, and the change was
+  reverted in full.
+
+Conclusion: enabling live per-process views requires reworking the memory
+layout first, specifically a kernel stack region that is identity mapped and
+separate from the heap page directory range, plus a return path whose frame
+lives on a page present in both tables. Those are layout changes, not switch
+changes, and they must land before any live switching is enabled. The kernel
+therefore keeps running every path on the full process page table; per-process
+views, the entry probe and the return trampoline remain available and unit
+tested as described in the previous section.
+
 ## Console and shell
 
 The console driver writes VGA text memory and mirrors output to COM1. Newlines
