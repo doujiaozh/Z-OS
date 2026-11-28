@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 1.4.0 implementation as it exists in this
+This document describes the Z-OS 1.5.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -1123,6 +1123,37 @@ This is stage one of KPTI: the restricted view exists, the trampoline switches
 tables, and the kernel verifies that the view hides kernel memory. The kernel
 does not yet run user processes on the restricted view, so no syscall or
 interrupt return path is switched yet; that is the next stage.
+
+## KPTI stage two: per-process views
+
+`kpti_build_process_view` builds a page table hierarchy for one process:
+
+- Private PML4, PDPT, direct page directory and a sealed copy of that process
+  own user page directory, so the view contains that process user pages and
+  nothing from the kernel heap region.
+- The view also maps the trampoline pages, the interrupt descriptor table page,
+  the global descriptor table page, the trampoline stacks, the probe state
+  words and the whole guarded kernel stack window as non executable writable
+  pages, so entry and return code can run before the kernel table is loaded.
+- Each process control block owns a `struct kpti_view` with a bounded frame
+  array; the view is built on create, rebuilt on exec and freed on release.
+  Tests assert that two views for the same address space have distinct roots,
+  that user pages resolve, and that the kernel image, heap, direct map and
+  device window do not resolve.
+
+Live switching status: the entry stubs and `kpti_return_to_user` are implemented
+and the trampoline can switch tables, but installing a per-process view as the
+live user page table is not enabled. Attempting it destabilised user returns:
+the return trampoline runs after the interrupt frame is popped and cannot rely
+on kernel stack mappings present only in the kernel table, and combined with
+`iretq` needing the frame to stay reachable, every attempt produced faults that
+escalated to a triple fault. Rather than ship a partially working isolation
+mechanism, the live slot is left inactive (`kpti_clear_return_slot` on every
+activation) and the kernel keeps running every path on the full process table.
+Per-process views, the trampoline entry switch and the return trampoline are
+present, unit tested and ready for the next stage, which must rework the return
+path (dedicated per-CPU entry stack plus a stub owned frame) before enabling the
+live switch.
 
 ## Console and shell
 

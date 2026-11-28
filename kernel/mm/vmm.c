@@ -1,6 +1,7 @@
 #include "vmm.h"
 #include "io.h"
 #include "lib.h"
+#include "kpti.h"
 #include "pmm.h"
 #include "spinlock.h"
 #include "string.h"
@@ -550,6 +551,7 @@ int vmm_switch_address_space(const struct address_space *space) {
         return -1;
     }
     write_cr3(space->pml4_phys);
+    kpti_select_view((struct address_space *)space);
     return 0;
 }
 

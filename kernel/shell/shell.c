@@ -1284,6 +1284,10 @@ static void command_hardening(void) {
     kprintf("kpti hides kernel data: %s hides direct map: %s\n",
             kpti_view_maps((u64)(usize)&vmm_audit_rwx) ? "no" : "yes",
             kpti_view_maps(0xFFFFFFFF80000000ULL) ? "no" : "yes");
+    kprintf("kpti live switching: %s entry switches: %llu return switches: %llu\n",
+            kpti_return_slot_value() != 0 ? "armed" : "inactive",
+            (unsigned long long)kpti_entry_switch_count(),
+            (unsigned long long)kpti_return_count());
     kprintf("hardening kernel stacks used: %llu of %llu\n",
             (unsigned long long)kstack_used(), (unsigned long long)kstack_total());
 }

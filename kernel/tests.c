@@ -2052,6 +2052,66 @@ static void test_kpti(void)
     check(kpti_user_cr3() == user_cr3 && kpti_kernel_cr3() == kernel_cr3,
           "kpti page table identifiers stay stable");
 }
+static void test_kpti_process_views(void)
+{
+    extern u8 __kernel_start[];
+    static struct kpti_view view;
+    struct address_space space;
+    check(vmm_create_address_space(&space) == 0, "per process view test creates an address space");
+    u64 frame = pmm_alloc_frame();
+    check(frame != 0, "per process view test allocates a user page frame");
+    check(vmm_map_user_page(&space, VMM_USER_SPACE_BASE, frame,
+                            PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NO_EXECUTE) == 0,
+          "per process view test maps a user page");
+    u64 stack_frame = pmm_alloc_frame();
+    check(stack_frame != 0 &&
+          vmm_map_user_page(&space, VMM_USER_STACK_BASE, stack_frame,
+                            PTE_PRESENT | PTE_WRITABLE | PTE_USER | PTE_NO_EXECUTE) == 0,
+          "per process view test maps a user stack page");
+    u64 stack_base = kstack_alloc(16 * 1024);
+    check(stack_base != 0, "per process view test allocates a guarded stack");
+    check(kpti_build_process_view(&space, stack_base, 4, &view) == 0 && view.built,
+          "per process view builds from a live address space");
+    check(view.cr3 != 0 && (view.cr3 & (PAGE_SIZE - 1)) == 0,
+          "per process view page table is page aligned");
+    check(view.cr3 != kpti_user_cr3() && view.cr3 != kpti_kernel_cr3(),
+          "per process view keeps its own page table root");
+    check(view.frame_count >= 4 && view.frame_count <= KPTI_VIEW_FRAMES,
+          "per process view owns a bounded number of frames");
+    check(kpti_view_maps_for(&view, VMM_USER_SPACE_BASE),
+          "per process view maps user code pages");
+    check(kpti_view_maps_for(&view, VMM_USER_STACK_BASE),
+          "per process view maps user stack pages");
+    check(kpti_view_maps_for(&view, kpti_trampoline_virtual()),
+          "per process view maps the entry trampoline");
+    check(!kpti_view_maps_for(&view, (u64)(usize)__kernel_start),
+          "per process view hides the kernel image");
+    check(!kpti_view_maps_for(&view, heap_base()),
+          "per process view hides the kernel heap");
+    check(!kpti_view_maps_for(&view, 0xFFFFFFFF80000000ULL),
+          "per process view hides the kernel direct map");
+    check(!kpti_view_maps_for(&view, 0xFFFFFFFF40000000ULL),
+          "per process view hides the device window");
+    u32 present = kpti_view_present_pages_for(&view);
+    check(present >= 1, "per process view maps a non empty page set");
+    check(!kpti_view_maps_for(&view, VMM_USER_SPACE_BASE + 0x200000ULL),
+          "per process view does not map unmapped user addresses");
+    struct kpti_view second;
+    check(kpti_build_process_view(&space, stack_base, 4, &second) == 0 && second.built,
+          "a second per process view can be built");
+    check(second.cr3 != view.cr3, "each per process view uses a distinct page table");
+    check(kpti_view_maps_for(&second, VMM_USER_SPACE_BASE) &&
+          !kpti_view_maps_for(&second, heap_base()),
+          "the second view isolates user pages the same way");
+    kpti_destroy_view(&second);
+    check(!second.built && second.cr3 == 0, "destroying a view clears its descriptor");
+    check(!kpti_view_maps_for(&second, VMM_USER_SPACE_BASE),
+          "a destroyed view no longer resolves user pages");
+    kpti_destroy_view(&view);
+    check(!view.built, "the first per process view is destroyed");
+    check(kstack_free(stack_base), "per process view test releases the guarded stack");
+    vmm_destroy_address_space(&space);
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -2091,6 +2151,7 @@ void selftest_thread(void *argument)
     test_hardening();
     test_isolation();
     test_kpti();
+    test_kpti_process_views();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

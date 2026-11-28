@@ -50,6 +50,14 @@ void tss_set_ist1(u64 stack) {
     tss_entry.ist1 = stack;
 }
 
+u64 gdt_base_address(void) {
+    return (u64)(usize)gdt_entries;
+}
+
+u64 tss_base_address(void) {
+    return (u64)(usize)&tss_entry;
+}
+
 void gdt_init(void) {
     memset(gdt_entries, 0, sizeof(gdt_entries));
     memset(&tss_entry, 0, sizeof(tss_entry));

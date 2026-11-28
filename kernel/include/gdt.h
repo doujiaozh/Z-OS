@@ -28,6 +28,8 @@ struct tss {
 } packed;
 
 void gdt_init(void);
+u64 gdt_base_address(void);
+u64 tss_base_address(void);
 void tss_set_rsp0(u64 stack);
 u64 tss_get_rsp0(void);
 void tss_set_ist1(u64 stack);

@@ -1,4 +1,6 @@
 #include "kpti.h"
+#include "gdt.h"
+#include "kstack.h"
 #include "interrupts.h"
 #include "io.h"
 #include "lib.h"
@@ -19,11 +21,14 @@ struct kpti_state {
     u64 trampoline_physical;
     u64 trampoline_pages;
     u64 switches;
+    u64 entry_switches;
+    u64 return_switches;
+    u64 view_cr3;
     u32 table_pages;
 };
 
 static struct kpti_state state;
-static u64 shadow_tables[8];
+static u64 shadow_tables[24];
 static u32 shadow_table_count = 0;
 
 static u64 page_down(u64 value) {
@@ -48,7 +53,7 @@ static int map_view_page(u64 *direct_pd, u64 virtual_address, u64 physical_addre
     u32 pt_index = (u32)((virtual_address >> 12) & 0x1FF);
     u64 *page_table = NULL;
     if ((direct_pd[pd_index] & PTE_PRESENT) == 0) {
-        if (shadow_table_count >= 8) {
+        if (shadow_table_count >= 24) {
             return -1;
         }
         u64 frame = zeroed_frame();
@@ -66,19 +71,26 @@ static int map_view_page(u64 *direct_pd, u64 virtual_address, u64 physical_addre
     return 0;
 }
 
-static int map_probe_state_pages(u64 *direct_pd) {
-    const u64 addresses[4] = {
-        (u64)(usize)&kpti_kernel_cr3_slot,
-        (u64)(usize)&kpti_probe_hit,
-        (u64)(usize)&kpti_probe_seen,
-        (u64)(usize)kpti_probe_stack,
-    };
-    for (u32 index = 0; index < 4; index++) {
-        u64 page = page_down(addresses[index]);
-        if (map_view_page(direct_pd, page, page, PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
+static int map_sealed_pd_page(u64 *sealed_pd, u64 virtual_address, u64 physical_address,
+                              u64 flags) {
+    u32 pd_index = (u32)((virtual_address >> 21) & 0x1FF);
+    u32 pt_index = (u32)((virtual_address >> 12) & 0x1FF);
+    if (pd_index < VMM_HEAP_FIRST_PD) {
+        return -1;
+    }
+    u64 *page_table = NULL;
+    if ((sealed_pd[pd_index] & PTE_PRESENT) == 0) {
+        u64 frame = zeroed_frame();
+        if (frame == 0) {
             return -1;
         }
+        sealed_pd[pd_index] = frame | PTE_PRESENT | PTE_WRITABLE;
+        page_table = (u64 *)frame;
+    } else {
+        page_table = (u64 *)(sealed_pd[pd_index] & PTE_ADDRESS);
     }
+    page_table[pt_index] = (physical_address & PTE_ADDRESS) |
+                           (flags & (0xFFF | PTE_NO_EXECUTE)) | PTE_PRESENT;
     return 0;
 }
 
@@ -86,6 +98,14 @@ static u64 current_stack_page(void) {
     u64 stack_pointer = 0;
     __asm__ volatile("mov %%rsp, %0" : "=r"(stack_pointer));
     return page_down(stack_pointer);
+}
+
+static int seal_user_directory(u64 *sealed_pd, u64 source_pd_physical) {
+    u64 *source = (u64 *)source_pd_physical;
+    for (u32 index = 0; index < VMM_HEAP_FIRST_PD; index++) {
+        sealed_pd[index] = source[index];
+    }
+    return 0;
 }
 
 int kpti_build_view(void) {
@@ -110,11 +130,7 @@ int kpti_build_view(void) {
     if (shadow_pml4 == 0 || shadow_pdpt == 0 || shadow_direct_pd == 0 || shadow_user_pd == 0) {
         return -1;
     }
-    u64 *sealed_user_pd = (u64 *)shadow_user_pd;
-    u64 *source_user_pd = (u64 *)user_pd_physical;
-    for (u32 index = 0; index < VMM_HEAP_FIRST_PD; index++) {
-        sealed_user_pd[index] = source_user_pd[index];
-    }
+    seal_user_directory((u64 *)shadow_user_pd, user_pd_physical);
     u64 *pml4 = (u64 *)shadow_pml4;
     u64 *pdpt = (u64 *)shadow_pdpt;
     u64 *direct_pd = (u64 *)shadow_direct_pd;
@@ -138,6 +154,29 @@ int kpti_build_view(void) {
     if (map_view_page(direct_pd, idt_base, idt_base, 0) != 0) {
         return -1;
     }
+    u64 return_stack_base = page_down((u64)(usize)kpti_return_stack);
+    u64 return_stack_limit = page_up((u64)(usize)kpti_return_stack_top);
+    for (u64 address = return_stack_base; address < return_stack_limit; address += PAGE_SIZE) {
+        if (map_view_page(direct_pd, address, address, PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
+            return -1;
+        }
+    }
+    u64 gdt_base = page_down(gdt_base_address());
+    if (map_view_page(direct_pd, gdt_base, gdt_base, PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
+        return -1;
+    }
+    const u64 state_pages[4] = {
+        (u64)(usize)&kpti_kernel_cr3_slot,
+        (u64)(usize)&kpti_return_cr3_slot,
+        (u64)(usize)&kpti_probe_hit,
+        (u64)(usize)&kpti_probe_seen,
+    };
+    for (u32 index = 0; index < 4; index++) {
+        u64 page = page_down(state_pages[index]);
+        if (map_view_page(direct_pd, page, page, PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
+            return -1;
+        }
+    }
     u64 probe_stack_base = page_down((u64)(usize)kpti_probe_stack);
     u64 probe_stack_limit = page_up((u64)(usize)kpti_probe_stack_top);
     for (u64 address = probe_stack_base; address < probe_stack_limit; address += PAGE_SIZE) {
@@ -145,23 +184,13 @@ int kpti_build_view(void) {
             return -1;
         }
     }
-    if (map_probe_state_pages(direct_pd) != 0) {
-        return -1;
-    }
-    u64 stack_page = current_stack_page();
-    if (map_view_page(direct_pd, stack_page, stack_page, PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
-        return -1;
-    }
-    if (map_view_page(direct_pd, stack_page + PAGE_SIZE, stack_page + PAGE_SIZE,
-                      PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
-        return -1;
-    }
     state.kernel_cr3 = kernel_pml4_physical;
     state.user_cr3 = shadow_pml4;
     state.shadow_pdpt = shadow_pdpt;
     state.shadow_direct_pd = shadow_direct_pd;
-    state.table_pages = 3 + shadow_table_count;
+    state.table_pages = 3 + shadow_table_count + 1;
     kpti_kernel_cr3_slot = kernel_pml4_physical;
+    kpti_return_cr3_slot = shadow_pml4;
     state.built = true;
     state.enabled = true;
     return 0;
@@ -171,6 +200,7 @@ void kpti_init(void) {
     memset(&state, 0, sizeof(state));
     shadow_table_count = 0;
     kpti_kernel_cr3_slot = 0;
+    kpti_return_cr3_slot = 0;
     kpti_probe_hit = 0;
     kpti_probe_seen = 0;
     kpti_build_view();
@@ -188,7 +218,11 @@ bool kpti_active(void) {
     if (!state.built) {
         return false;
     }
-    return (read_cr3() & PTE_ADDRESS) == (state.user_cr3 & PTE_ADDRESS);
+    u64 current = read_cr3() & PTE_ADDRESS;
+    if (current == (state.user_cr3 & PTE_ADDRESS)) {
+        return true;
+    }
+    return false;
 }
 
 u64 kpti_kernel_cr3(void) {
@@ -197,6 +231,26 @@ u64 kpti_kernel_cr3(void) {
 
 u64 kpti_user_cr3(void) {
     return state.user_cr3;
+}
+
+u64 kpti_active_view_cr3(void) {
+    return state.view_cr3;
+}
+
+u64 kpti_return_slot_value(void) {
+    return kpti_return_cr3_slot;
+}
+
+u64 kpti_view_counter(void) {
+    return state.entry_switches + state.return_switches;
+}
+
+u64 kpti_entry_switch_count(void) {
+    return state.entry_switches;
+}
+
+u64 kpti_return_count(void) {
+    return state.return_switches;
 }
 
 u64 kpti_trampoline_virtual(void) {
@@ -219,11 +273,8 @@ u64 kpti_probe_stack_virtual(void) {
     return page_down((u64)(usize)kpti_probe_stack);
 }
 
-bool kpti_view_maps(u64 virtual_address) {
-    if (!state.built) {
-        return true;
-    }
-    u64 *pml4 = (u64 *)state.user_cr3;
+static bool walk_maps(u64 cr3, u64 virtual_address) {
+    u64 *pml4 = (u64 *)cr3;
     u32 pml4_index = (u32)((virtual_address >> 39) & 0x1FF);
     if ((pml4[pml4_index] & PTE_PRESENT) == 0) {
         return false;
@@ -249,28 +300,57 @@ bool kpti_view_maps(u64 virtual_address) {
     return (pt[pt_index] & PTE_PRESENT) != 0;
 }
 
-u32 kpti_view_present_pages(void) {
-    if (!state.built) {
-        return 0;
-    }
-    u64 *direct_pd = (u64 *)state.shadow_direct_pd;
+static u32 count_present(u64 cr3) {
+    u64 *pml4 = (u64 *)cr3;
     u32 pages = 0;
-    for (u32 pd_index = 0; pd_index < 512; pd_index++) {
-        if ((direct_pd[pd_index] & PTE_PRESENT) == 0) {
+    for (u32 pml4_index = 0; pml4_index < 512; pml4_index++) {
+        if ((pml4[pml4_index] & PTE_PRESENT) == 0) {
             continue;
         }
-        if ((direct_pd[pd_index] & PTE_HUGE) != 0) {
-            pages += 512;
-            continue;
-        }
-        u64 *pt = (u64 *)(direct_pd[pd_index] & PTE_ADDRESS);
-        for (u32 pt_index = 0; pt_index < 512; pt_index++) {
-            if ((pt[pt_index] & PTE_PRESENT) != 0) {
-                pages++;
+        u64 *pdpt = (u64 *)(pml4[pml4_index] & PTE_ADDRESS);
+        for (u32 pdpt_index = 0; pdpt_index < 512; pdpt_index++) {
+            u64 pdpt_entry = pdpt[pdpt_index];
+            if ((pdpt_entry & PTE_PRESENT) == 0) {
+                continue;
+            }
+            if ((pdpt_entry & PTE_HUGE) != 0) {
+                pages += 512;
+                continue;
+            }
+            u64 *pd = (u64 *)(pdpt_entry & PTE_ADDRESS);
+            for (u32 pd_index = 0; pd_index < 512; pd_index++) {
+                u64 pd_entry = pd[pd_index];
+                if ((pd_entry & PTE_PRESENT) == 0) {
+                    continue;
+                }
+                if ((pd_entry & PTE_HUGE) != 0) {
+                    pages += 512;
+                    continue;
+                }
+                u64 *pt = (u64 *)(pd_entry & PTE_ADDRESS);
+                for (u32 pt_index = 0; pt_index < 512; pt_index++) {
+                    if ((pt[pt_index] & PTE_PRESENT) != 0) {
+                        pages++;
+                    }
+                }
             }
         }
     }
     return pages;
+}
+
+bool kpti_view_maps(u64 virtual_address) {
+    if (!state.built) {
+        return true;
+    }
+    return walk_maps(state.user_cr3, virtual_address);
+}
+
+u32 kpti_view_present_pages(void) {
+    if (!state.built) {
+        return 0;
+    }
+    return count_present(state.user_cr3);
 }
 
 int kpti_enter_kernel(void) {
@@ -282,6 +362,7 @@ int kpti_enter_kernel(void) {
     }
     write_cr3(state.kernel_cr3);
     state.switches++;
+    state.entry_switches++;
     return 0;
 }
 
@@ -289,11 +370,13 @@ int kpti_leave_kernel(void) {
     if (!state.built) {
         return -1;
     }
-    if ((read_cr3() & PTE_ADDRESS) == (state.user_cr3 & PTE_ADDRESS)) {
+    u64 target = state.user_cr3;
+    if ((read_cr3() & PTE_ADDRESS) == (target & PTE_ADDRESS)) {
         return 0;
     }
-    write_cr3(state.user_cr3);
+    write_cr3(target);
     state.switches++;
+    state.return_switches++;
     return 0;
 }
 
@@ -301,22 +384,130 @@ u64 kpti_switch_count(void) {
     return state.switches;
 }
 
-int kpti_probe_active_view(void) {
-    if (!state.built) {
+void kpti_blend_slots(u64 kernel_cr3, u64 user_cr3) {
+    if (kernel_cr3 != 0) {
+        kpti_kernel_cr3_slot = kernel_cr3;
+    }
+    state.view_cr3 = user_cr3;
+    kpti_return_cr3_slot = user_cr3;
+}
+
+void kpti_clear_return_slot(void) {
+    state.view_cr3 = 0;
+    kpti_return_cr3_slot = 0;
+}
+
+void kpti_select_view(struct address_space *space) {
+    if (space == NULL || !space->ready) {
+        kpti_clear_return_slot();
+        return;
+    }
+    kpti_kernel_cr3_slot = space->pml4_phys;
+}
+
+int kpti_build_process_view(struct address_space *space, u64 kernel_stack_base,
+                           u32 kernel_stack_pages, struct kpti_view *view) {
+    if (space == NULL || view == NULL || kernel_stack_base == 0) {
         return -1;
     }
-    u64 irq_flags = irq_save();
-    u64 saved = read_cr3();
-    kpti_enter_kernel();
-    bool on_kernel = !kpti_active();
-    u64 probe = kpti_probe_switch(state.user_cr3, state.kernel_cr3);
-    write_cr3(saved);
-    bool matched = (probe & PTE_ADDRESS) == (state.user_cr3 & PTE_ADDRESS);
-    irq_restore(irq_flags);
-    if (state.user_cr3 == 0) {
+    memset(view, 0, sizeof(struct kpti_view));
+    if (!space->ready || space->user_pd_phys == 0) {
         return -1;
     }
-    return (on_kernel && matched) ? 0 : -1;
+    u64 user_pd_physical = space->user_pd_phys;
+    u64 pml4_frame = zeroed_frame();
+    u64 pdpt_frame = zeroed_frame();
+    u64 direct_pd_frame = zeroed_frame();
+    u64 user_pd_frame = zeroed_frame();
+    if (pml4_frame == 0 || pdpt_frame == 0 || direct_pd_frame == 0 || user_pd_frame == 0) {
+        return -1;
+    }
+    view->frames[view->frame_count++] = pml4_frame;
+    view->frames[view->frame_count++] = pdpt_frame;
+    view->frames[view->frame_count++] = direct_pd_frame;
+    view->frames[view->frame_count++] = user_pd_frame;
+    seal_user_directory((u64 *)user_pd_frame, user_pd_physical);
+    u64 *pml4 = (u64 *)pml4_frame;
+    u64 *pdpt = (u64 *)pdpt_frame;
+    u64 *direct_pd = (u64 *)direct_pd_frame;
+    pdpt[0] = direct_pd_frame | PTE_PRESENT | PTE_WRITABLE;
+    pdpt[1] = user_pd_frame | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    pml4[0] = pdpt_frame | PTE_PRESENT | PTE_WRITABLE | PTE_USER;
+    u32 saved_tables = shadow_table_count;
+    shadow_table_count = 0;
+    u64 point_addresses[10];
+    u32 point_count = 0;
+    u64 trampoline_start = page_down((u64)(usize)__trampoline_start);
+    u64 trampoline_end = page_up((u64)(usize)__trampoline_end);
+    for (u64 address = trampoline_start; address < trampoline_end; address += PAGE_SIZE) {
+        if (map_view_page(direct_pd, address, address, 0) != 0) {
+            shadow_table_count = saved_tables;
+            return -1;
+        }
+    }
+    point_addresses[point_count++] = page_down(interrupt_idt_base());
+    point_addresses[point_count++] = page_down(gdt_base_address());
+    point_addresses[point_count++] = page_down((u64)(usize)&kpti_kernel_cr3_slot);
+    point_addresses[point_count++] = page_down((u64)(usize)&kpti_return_cr3_slot);
+    point_addresses[point_count++] = page_down((u64)(usize)kpti_probe_stack);
+    for (u32 index = 0; index < point_count; index++) {
+        u64 page = point_addresses[index];
+        u64 flags = (page == page_down(interrupt_idt_base())) ? 0 : (PTE_WRITABLE | PTE_NO_EXECUTE);
+        if (page == page_down((u64)(usize)kpti_probe_stack)) {
+            flags = PTE_WRITABLE | PTE_NO_EXECUTE;
+        }
+        if (map_view_page(direct_pd, page, page, flags) != 0) {
+            shadow_table_count = saved_tables;
+            return -1;
+        }
+    }
+    u64 stack_window_pages = (u64)KSTACK_SLOT_COUNT * (KSTACK_MAX_PAGES + 1);
+    for (u64 index = 0; index < stack_window_pages; index++) {
+        u64 address = KSTACK_WINDOW_BASE + index * PAGE_SIZE;
+        if (map_sealed_pd_page((u64 *)user_pd_frame, address, address,
+                               PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
+            shadow_table_count = saved_tables;
+            return -1;
+        }
+    }
+    (void)kernel_stack_base;
+    (void)kernel_stack_pages;
+    for (u32 index = 0; index < shadow_table_count; index++) {
+        if (view->frame_count >= KPTI_VIEW_FRAMES) {
+            break;
+        }
+        view->frames[view->frame_count++] = shadow_tables[index];
+    }
+    shadow_table_count = saved_tables;
+    view->cr3 = pml4_frame;
+    view->built = true;
+    return 0;
+}
+
+void kpti_destroy_view(struct kpti_view *view) {
+    if (view == NULL || !view->built) {
+        return;
+    }
+    for (u32 index = 0; index < view->frame_count; index++) {
+        if (view->frames[index] != 0) {
+            pmm_free_frame(view->frames[index]);
+        }
+    }
+    memset(view, 0, sizeof(struct kpti_view));
+}
+
+bool kpti_view_maps_for(const struct kpti_view *view, u64 virtual_address) {
+    if (view == NULL || !view->built) {
+        return false;
+    }
+    return walk_maps(view->cr3, virtual_address);
+}
+
+u32 kpti_view_present_pages_for(const struct kpti_view *view) {
+    if (view == NULL || !view->built) {
+        return 0;
+    }
+    return count_present(view->cr3);
 }
 
 int kpti_run_switch_probe(void) {
@@ -337,6 +528,21 @@ int kpti_run_switch_probe(void) {
     return restored ? 0 : -1;
 }
 
+int kpti_probe_active_view(void) {
+    if (!state.built) {
+        return -1;
+    }
+    u64 irq_flags = irq_save();
+    u64 saved = read_cr3();
+    kpti_enter_kernel();
+    bool on_kernel = !kpti_active();
+    u64 probe = kpti_probe_switch(state.user_cr3, state.kernel_cr3);
+    write_cr3(saved);
+    bool matched = (probe & PTE_ADDRESS) == (state.user_cr3 & PTE_ADDRESS);
+    irq_restore(irq_flags);
+    return (on_kernel && matched) ? 0 : -1;
+}
+
 bool kpti_probe_hit_flag(void) {
     return kpti_probe_hit != 0;
 }
@@ -345,35 +551,16 @@ u64 kpti_probe_original_cr3(void) {
     return kpti_probe_seen;
 }
 
-int kpti_run_entry_probe(void) {
-    if (!state.built) {
-        return -1;
-    }
-    u64 irq_flags = irq_save();
-    u64 saved = read_cr3();
-    kpti_probe_hit = 0;
-    kpti_probe_seen = 0;
-    kpti_probe_enter(state.user_cr3, state.kernel_cr3);
-    write_cr3(saved);
-    bool hit = kpti_probe_hit_flag();
-    bool matched = (kpti_probe_original_cr3() & PTE_ADDRESS) == (state.user_cr3 & PTE_ADDRESS);
-    irq_restore(irq_flags);
-    if (!hit) {
-        return -1;
-    }
-    return matched ? 0 : -1;
-}
-
 int kpti_seal_process(struct address_space *space) {
-    if (space == NULL) {
+    if (space == NULL || !space->ready) {
         return -1;
     }
     return 0;
 }
 
 u32 kpti_user_kernel_pages(struct address_space *space) {
-    if (space == NULL) {
+    if (space == NULL || !space->ready) {
         return 0;
     }
-    return 0;
+    return count_present(space->pml4_phys);
 }

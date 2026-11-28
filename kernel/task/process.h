@@ -3,6 +3,7 @@
 
 #include "cred.h"
 #include "fd.h"
+#include "kpti.h"
 #include "signal.h"
 #include "task.h"
 #include "types.h"
@@ -56,6 +57,8 @@ struct process {
     struct fd_table fds;
     struct credentials cred;
     struct signal_state signals;
+    struct kpti_view kpti;
+    bool kpti_ready;
     struct process *ready_next;
 };
 

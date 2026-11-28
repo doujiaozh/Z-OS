@@ -75,6 +75,7 @@ static void activate_process(struct process *process) {
     process_set_current(process);
     write_cr3(process->space.pml4_phys);
     tss_set_rsp0(process->kernel_stack_top);
+    kpti_clear_return_slot();
 }
 
 static bool batch_has_blocked_process(void) {

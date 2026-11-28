@@ -9,6 +9,7 @@
 #include "string.h"
 #include "timer.h"
 #include "vmm.h"
+#include "kpti.h"
 #include "kstack.h"
 #include "socket.h"
 #include "waitq.h"
@@ -46,6 +47,10 @@ static struct process *allocate_process(const char *name, u64 parent_pid) {
 static void release_process(struct process *process) {
     if (process == NULL) {
         return;
+    }
+    if (process->kpti_ready) {
+        kpti_destroy_view(&process->kpti);
+        process->kpti_ready = false;
     }
     if (process->kernel_stack_base != 0) {
         kstack_free(process->kernel_stack_base);
@@ -220,6 +225,14 @@ struct process *process_create(const char *name, u64 parent_pid, const void *ima
         release_process(process);
         return NULL;
     }
+    if (kpti_build_process_view(&process->space, process->kernel_stack_base,
+                                PROCESS_KERNEL_STACK_SIZE / PAGE_SIZE,
+                                &process->kpti) != 0) {
+        vmm_destroy_address_space(&process->space);
+        release_process(process);
+        return NULL;
+    }
+    process->kpti_ready = true;
     process->entry = entry;
     process_reset_frame(process_frame_slot(process), entry, process->user_stack_top);
     process->frame_rsp = process->kernel_stack_top - sizeof(struct registers);
@@ -263,6 +276,14 @@ int process_fork_frame(u64 parent_pid, const struct registers *frame, u64 *child
     struct registers *child_frame = process_frame_slot(child);
     memcpy(child_frame, frame, sizeof(struct registers));
     child_frame->rax = 0;
+    if (kpti_build_process_view(&child->space, child->kernel_stack_base,
+                                PROCESS_KERNEL_STACK_SIZE / PAGE_SIZE,
+                                &child->kpti) != 0) {
+        vmm_destroy_address_space(&child->space);
+        release_process(child);
+        return PROCESS_ERROR_MEMORY;
+    }
+    child->kpti_ready = true;
     child->frame_rsp = child->kernel_stack_top - sizeof(struct registers);
     child->quantum = PROCESS_QUANTUM_TICKS;
     process_enqueue_ready(child);
@@ -300,9 +321,19 @@ int process_exec_current(const void *image, u64 image_size, struct registers *fr
         vmm_destroy_address_space(&replacement);
         return PROCESS_ERROR_MEMORY;
     }
+    if (process->kpti_ready) {
+        kpti_destroy_view(&process->kpti);
+        process->kpti_ready = false;
+    }
     process->space = replacement;
     process->entry = entry;
     process->user_stack_top = PROCESS_STACK_TOP;
+    if (kpti_build_process_view(&process->space, process->kernel_stack_base,
+                                PROCESS_KERNEL_STACK_SIZE / PAGE_SIZE,
+                                &process->kpti) == 0) {
+        process->kpti_ready = true;
+        kpti_blend_slots(process->space.pml4_phys, process->kpti.cr3);
+    }
     vmm_destroy_address_space(&previous);
     process_reset_frame(frame, entry, process->user_stack_top);
     return PROCESS_ERROR_NONE;
