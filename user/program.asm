@@ -17,8 +17,6 @@ global user_nettest2_start
 global user_nettest2_end
 global user_wget_start
 global user_wget_end
-global user_dbclient_start
-global user_dbclient_end
 
 user_program_start:
     incbin "user_init.elf"
@@ -51,7 +49,3 @@ user_nettest2_end:
 user_wget_start:
     incbin "user_wget.elf"
 user_wget_end:
-
-user_dbclient_start:
-    incbin "user_dbclient.elf"
-user_dbclient_end:

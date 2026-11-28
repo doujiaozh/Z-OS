@@ -12,6 +12,13 @@ SECTIONS
         *(.text .text.*)
     }
 
+    .trampoline : ALIGN(0x1000)
+    {
+        __trampoline_start = .;
+        *(.trampoline)
+        __trampoline_end = .;
+    }
+
     .rodata : ALIGN(16)
     {
         *(.rodata .rodata.*)
@@ -21,6 +28,7 @@ SECTIONS
     {
         __data_start = .;
         *(.data .data.*)
+        *(.kptidata)
     }
 
     .bss : ALIGN(0x1000)

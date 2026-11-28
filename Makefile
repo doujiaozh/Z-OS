@@ -2,15 +2,12 @@ PYTHON ?= python3
 QEMU ?= qemu-system-x86_64
 IMAGE := build/z-os.img
 
-.PHONY: all build test smoke bootcheck storage gui keyboard shell verify run clean minidb
+.PHONY: all build test smoke bootcheck storage gui keyboard shell verify run clean
 
 all: build
 
 build:
 	$(PYTHON) tools/build.py
-
-minidb:
-	$(PYTHON) tools/verify.py minidb
 
 test:
 	$(PYTHON) tools/verify.py test

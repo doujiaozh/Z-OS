@@ -16,6 +16,7 @@
 #include "fd.h"
 #include "font.h"
 #include "heap.h"
+#include "kpti.h"
 #include "kstack.h"
 #include "http.h"
 #include "input.h"
@@ -1987,6 +1988,70 @@ static void test_isolation(void)
     pmm_free_frame(pmm_alloc_frame());
     check(vmm_audit_rwx(NULL) == 0, "rwx audit stays clean after mapping probes");
 }
+static void test_kpti(void)
+{
+    extern u8 __data_start[];
+    extern u8 __kernel_start[];
+    check(kpti_enabled() && kpti_built(), "kpti builds a restricted user view at boot");
+    u64 user_cr3 = kpti_user_cr3();
+    u64 kernel_cr3 = kpti_kernel_cr3();
+    check(user_cr3 != 0 && kernel_cr3 != 0 && user_cr3 != kernel_cr3,
+          "kpti keeps separate user and kernel page tables");
+    check((user_cr3 & (PAGE_SIZE - 1)) == 0 && (kernel_cr3 & (PAGE_SIZE - 1)) == 0,
+          "kpti page tables are page aligned");
+    check(kpti_trampoline_pages() >= 1 && kpti_trampoline_pages() <= 4,
+          "kpti trampoline occupies a bounded page range");
+    check(kpti_view_table_pages() >= 3, "kpti user view owns private page table frames");
+    u64 trampoline = kpti_trampoline_virtual();
+    check(trampoline != 0 && kpti_view_maps(trampoline),
+          "kpti user view maps the entry trampoline");
+    check((read_cr3() & PTE_ADDRESS) == kernel_cr3,
+          "kernel runs on the kernel page table");
+    check(kpti_active() == false, "kpti reports inactive while the kernel table is loaded");
+    check(kpti_run_switch_probe() == 0,
+          "trampoline switches cr3 to the restricted user view and back");
+    check((kpti_probe_original_cr3() & PTE_ADDRESS) == user_cr3,
+          "trampoline observed the restricted user view");
+    check((read_cr3() & PTE_ADDRESS) == kernel_cr3,
+          "trampoline restores the kernel page table");
+    check(kpti_view_maps(interrupt_idt_base()),
+          "user view maps the interrupt descriptor table for the entry trampoline");
+    check(kpti_view_maps((u64)(usize)&kpti_kernel_cr3_slot),
+          "user view maps the kernel cr3 slot used by the trampoline");
+    check(kpti_view_present_pages() <= 24,
+          "user view exposes only trampoline entry pages");
+    check(!kpti_view_maps(heap_base()),
+          "user view hides kernel heap pages");
+    check(!kpti_view_maps(heap_base() + 0x1000ULL),
+          "user view hides further kernel heap pages");
+    check(!kpti_view_maps((u64)(usize)__kernel_start),
+          "user view hides kernel image pages");
+    check(!kpti_view_maps((u64)(usize)__kernel_start + 0x80000ULL),
+          "user view hides kernel text pages");
+    check(!kpti_view_maps(0xFFFFFFFF80000000ULL),
+          "user view hides the kernel direct map");
+    check(!kpti_view_maps(0xFFFFFFFF40000000ULL),
+          "user view hides the device window");
+    u32 present = kpti_view_present_pages();
+    check(present >= 1 && present < 64, "user view stays small and non empty");
+    check(kpti_view_maps(kpti_probe_stack_virtual()),
+          "user view maps the trampoline stack");
+    check(kpti_user_kernel_pages(NULL) == 0, "kpti audit rejects a null address space");
+    check(kpti_seal_process(NULL) != 0, "kpti seal rejects a null address space");
+    check(kpti_enter_kernel() == 0 && (read_cr3() & PTE_ADDRESS) == kernel_cr3,
+          "kernel entry keeps the kernel page table loaded");
+    check(kpti_probe_active_view() == 0,
+          "trampoline observes the restricted view while the kernel keeps its table");
+    check((read_cr3() & PTE_ADDRESS) == kernel_cr3,
+          "kernel page table survives the restricted view probe");
+    u64 observed_switch = kpti_probe_switch(user_cr3, kernel_cr3);
+    check((observed_switch & PTE_ADDRESS) == user_cr3 &&
+          (read_cr3() & PTE_ADDRESS) == kernel_cr3,
+          "trampoline installs and removes the restricted view");
+    check(kpti_switch_count() >= 0, "kpti exposes a page table switch counter");
+    check(kpti_user_cr3() == user_cr3 && kpti_kernel_cr3() == kernel_cr3,
+          "kpti page table identifiers stay stable");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -2025,6 +2090,7 @@ void selftest_thread(void *argument)
     test_platform();
     test_hardening();
     test_isolation();
+    test_kpti();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

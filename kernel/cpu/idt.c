@@ -6,8 +6,10 @@
 #include "console.h"
 #include "e1000.h"
 #include "keyboard.h"
+#include "kpti.h"
 #include "kstack.h"
 #include "process.h"
+#include "vmm.h"
 #include "serial.h"
 #include "timer.h"
 #include "mouse.h"
@@ -86,11 +88,20 @@ static void idt_set_gate(u8 vector, u64 handler, u16 selector, u8 attributes, u8
     entry->reserved = 0;
 }
 
+u64 idt_table_physical(void) {
+    return vmm_get_physical((u64)(usize)idt);
+}
+
+u64 interrupt_idt_base(void) {
+    return (u64)(usize)idt;
+}
+
 void interrupts_init(void) {
     for (u32 vector = 0; vector < 256; vector++) {
         idt_set_gate((u8)vector, (u64)isr_stub_table[vector], GDT_KERNEL_CODE, 0x8E, vector == 8 ? 1 : 0);
     }
     idt_set_gate(0x80, (u64)isr_stub_table[0x80], GDT_KERNEL_CODE, 0xEE, 0);
+    idt_set_gate(0x81, (u64)(usize)kpti_probe_entry, GDT_KERNEL_CODE, 0x8E, 0);
     idt_pointer.limit = (u16)(sizeof(idt) - 1);
     idt_pointer.base = (u64)idt;
     __asm__ volatile("lidt %0" : : "m"(idt_pointer));

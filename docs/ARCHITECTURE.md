@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 1.3.0 implementation as it exists in this
+This document describes the Z-OS 1.4.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -1096,6 +1096,33 @@ under an AC window, polling until any descriptor is ready or the timeout
 expires, and writing revents back. `user/libc.h` provides `struct pollfd` and
 `net_poll`, and the shell `polltest` command exercises idle, readable and
 timeout behaviour.
+
+## KPTI stage one: restricted user view and entry trampoline
+
+`kernel/mm/kpti.c` builds a separate page table hierarchy for the restricted
+user view at boot:
+
+- A private PML4, PDPT, direct page directory and a sealed copy of the user page
+  directory. The sealed copy keeps only the user mapped entries, so the user
+  view no longer inherits the kernel heap page directory entries that the
+  process address space shares.
+- The view maps exactly: the trampoline pages, the interrupt descriptor table
+  page, the trampoline stack, the current kernel stack pages, the probe state
+  words, and the process user pages through the sealed directory. Kernel image
+  pages, heap pages, the high-half direct map and the device window are absent.
+- `kernel/arch/trampoline.asm` holds the entry trampoline in its own executable
+  section. `kpti_probe_switch` switches CR3 to the restricted view, observes the
+  value, and switches back; `kpti_probe_entry` is installed on interrupt vector
+  0x81 and is reached only while the restricted view is loaded, where it reads
+  the kernel CR3 slot and switches to the kernel table before returning.
+- `kpti_enter_kernel`, `kpti_leave_kernel` and the probe helpers all run with
+  interrupts masked, and every probe restores the caller CR3 before returning,
+  so preemption cannot observe a partially switched state.
+
+This is stage one of KPTI: the restricted view exists, the trampoline switches
+tables, and the kernel verifies that the view hides kernel memory. The kernel
+does not yet run user processes on the restricted view, so no syscall or
+interrupt return path is switched yet; that is the next stage.
 
 ## Console and shell
 

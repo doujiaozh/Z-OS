@@ -29,6 +29,8 @@ struct registers {
 };
 
 void interrupts_init(void);
+u64 idt_table_physical(void);
+u64 interrupt_idt_base(void);
 void exceptions_init(void);
 void interrupt_dispatch(struct registers *registers);
 const char *exception_name(u64 vector);

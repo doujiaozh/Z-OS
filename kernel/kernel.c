@@ -5,6 +5,7 @@
 #include "gdt.h"
 #include "heap.h"
 #include "kstack.h"
+#include "kpti.h"
 #include "protect.h"
 #include "interrupts.h"
 #include "io.h"
@@ -89,6 +90,7 @@ void kmain(struct boot_info *boot) {
     mouse_init();
     mouse_event_init();
     kernel_nx_sweep();
+    kpti_init();
     sched_init();
 
     if (fb_device_found()) {

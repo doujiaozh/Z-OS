@@ -49,7 +49,8 @@ network, TCP, internet, platform, desktop, buffering and VGA restore tests.
 | POSIX select, non-blocking sockets, libc network API, user wget | Implemented and verified | v1.0.0-platform |
 | SMEP, SMAP and heap KASLR | Implemented and verified | v1.0.0-platform |
 | Guard pages, stack canaries, NX, W^X, poll | Implemented and verified | v1.1.0-hardening |
-| KPTI, full image KASLR, shadow stacks, TLS | Planned, next | v1.2.0-isolation |
+| Restricted user view with entry trampoline | Implemented and verified | v1.4.0-kpti-part1 |
+| KPTI return path switching, image KASLR, shadow stacks | Planned, next | v1.5.0-kpti-part2 |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 
