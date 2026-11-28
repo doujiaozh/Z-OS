@@ -6,8 +6,23 @@
 
 #define TGPT_HEADER_BYTES 40
 
+#define TGPT_DTYPE_F16 1
+#define TGPT_DTYPE_I8 2
+#define TGPT_DTYPE_F32 0
+
 static float *half_table = NULL;
 static int half_table_ready = 0;
+
+u64 tgpt_rdtsc(void) {
+    u32 low = 0;
+    u32 high = 0;
+    __asm__ volatile("rdtsc" : "=a"(low), "=d"(high));
+    return ((u64)high << 32) | low;
+}
+
+void tgpt_profile_reset(struct tgpt_profile *profile) {
+    memset(profile, 0, sizeof(*profile));
+}
 
 static float half_convert(u16 value) {
     u32 sign = (u32)(value & 0x8000u) << 16;
@@ -135,10 +150,80 @@ static void tgpt_matvec(const float *input, const u16 *matrix, int rows, int col
     for (int row = 0; row < rows; row++) {
         const u16 *weights = matrix + (u64)row * columns;
         float total = 0.0f;
+        int column = 0;
+        float a0 = 0.0f;
+        float a1 = 0.0f;
+        float a2 = 0.0f;
+        float a3 = 0.0f;
+        for (; column + 4 <= columns; column += 4) {
+            a0 += input[column] * half_to_float(weights[column]);
+            a1 += input[column + 1] * half_to_float(weights[column + 1]);
+            a2 += input[column + 2] * half_to_float(weights[column + 2]);
+            a3 += input[column + 3] * half_to_float(weights[column + 3]);
+        }
+        total = (a0 + a1) + (a2 + a3);
+        for (; column < columns; column++) {
+            total += input[column] * half_to_float(weights[column]);
+        }
+        output[row] = total;
+    }
+}
+
+static float tgpt_row_absmax(const float *values, int count) {
+    float peak = 0.0f;
+    for (int index = 0; index < count; index++) {
+        float value = values[index] < 0.0f ? -values[index] : values[index];
+        if (value > peak) {
+            peak = value;
+        }
+    }
+    return peak;
+}
+
+static void tgpt_quantize_vector(const float *input, i8 *output, int count, float *scale) {
+    float peak = tgpt_row_absmax(input, count);
+    if (peak <= 0.0f) {
+        *scale = 0.0f;
+        for (int index = 0; index < count; index++) {
+            output[index] = 0;
+        }
+        return;
+    }
+    float factor = 127.0f / peak;
+    *scale = peak / 127.0f;
+    for (int index = 0; index < count; index++) {
+        float scaled = input[index] * factor;
+        int rounded = (int)(scaled < 0.0f ? scaled - 0.5f : scaled + 0.5f);
+        if (rounded > 127) {
+            rounded = 127;
+        }
+        if (rounded < -127) {
+            rounded = -127;
+        }
+        output[index] = (i8)rounded;
+    }
+}
+
+static void tgpt_matvec_nt(const float *input, const u16 *matrix, int rows, int columns, float *output) {
+    for (int row = 0; row < rows; row++) {
+        const u16 *weights = matrix + (u64)row * columns;
+        float total = 0.0f;
         for (int column = 0; column < columns; column++) {
             total += input[column] * half_to_float(weights[column]);
         }
         output[row] = total;
+    }
+}
+
+static void tgpt_matvec_q8(const i8 *vector, float vector_scale, const i8 *matrix, const float *scales,
+                           int rows, int columns, float *output) {
+    for (int row = 0; row < rows; row++) {
+        const i8 *weights = matrix + (u64)row * columns;
+        i32 total = 0;
+        for (int column = 0; column < columns; column++) {
+            total += (i32)weights[column] * (i32)vector[column];
+        }
+        output[row] = (float)total * scales[row] * vector_scale;
     }
 }
 
@@ -164,8 +249,16 @@ static void tgpt_softmax(float *values, int count) {
     }
 }
 
-static int tgpt_section_read(const u8 *blob, u64 size, u64 *cursor, const char *want, const u8 **data,
-                             u64 *bytes) {
+struct tgpt_section {
+    const u8 *data;
+    u64 bytes;
+    u32 dtype;
+    u64 rows;
+    u64 columns;
+};
+
+static int tgpt_section_read(const u8 *blob, u64 size, u64 *cursor, const char *want,
+                             struct tgpt_section *section) {
     u64 offset = *cursor;
     u32 name_length = 0;
     if (offset + 4 > size) {
@@ -190,7 +283,11 @@ static int tgpt_section_read(const u8 *blob, u64 size, u64 *cursor, const char *
     if (offset + (u64)rank * 8 + 12 > size) {
         return 0;
     }
-    offset += (u64)rank * 8;
+    u64 dims[2] = {0, 0};
+    for (u32 index = 0; index < rank; index++) {
+        memcpy(&dims[index], blob + offset, 8);
+        offset += 8;
+    }
     u32 dtype = 0;
     memcpy(&dtype, blob + offset, 4);
     offset += 4;
@@ -201,11 +298,11 @@ static int tgpt_section_read(const u8 *blob, u64 size, u64 *cursor, const char *
         return 0;
     }
     if (want != NULL && strlen(want) == name_length && memcmp(name, want, name_length) == 0) {
-        if (dtype != 1) {
-            return 0;
-        }
-        *data = blob + offset;
-        *bytes = payload;
+        section->data = blob + offset;
+        section->bytes = payload;
+        section->dtype = dtype;
+        section->rows = dims[0];
+        section->columns = rank == 2 ? dims[1] : 0;
         return 1;
     }
     *cursor = offset + payload;
@@ -214,12 +311,14 @@ static int tgpt_section_read(const u8 *blob, u64 size, u64 *cursor, const char *
 
 static const u16 *tgpt_tensor(const u8 *blob, u64 size, const char *name, u64 expected) {
     u64 cursor = TGPT_HEADER_BYTES;
+    struct tgpt_section section;
     for (;;) {
-        const u8 *data = NULL;
-        u64 bytes = 0;
-        int found = tgpt_section_read(blob, size, &cursor, name, &data, &bytes);
+        int found = tgpt_section_read(blob, size, &cursor, name, &section);
         if (found > 0) {
-            return bytes == expected * 2 ? (const u16 *)data : NULL;
+            if (section.dtype != TGPT_DTYPE_F16 || section.bytes != expected * 2) {
+                return NULL;
+            }
+            return (const u16 *)section.data;
         }
         if (found == 0) {
             return NULL;
@@ -227,8 +326,76 @@ static const u16 *tgpt_tensor(const u8 *blob, u64 size, const char *name, u64 ex
     }
 }
 
+static int tgpt_tensor_q8(const u8 *blob, u64 size, const char *name, u64 rows, u64 columns,
+                          const i8 **codes, const float **scales) {
+    char scale_name[96];
+    ksnprintf(scale_name, sizeof(scale_name), "%s.q8scale", name);
+    u64 cursor = TGPT_HEADER_BYTES;
+    struct tgpt_section codes_section;
+    int found = 0;
+    for (;;) {
+        int result = tgpt_section_read(blob, size, &cursor, name, &codes_section);
+        if (result > 0) {
+            found = 1;
+            break;
+        }
+        if (result == 0) {
+            return -1;
+        }
+    }
+    if (found == 0 || codes_section.dtype != TGPT_DTYPE_I8 || codes_section.bytes != rows * columns) {
+        return -1;
+    }
+    cursor = TGPT_HEADER_BYTES;
+    struct tgpt_section scale_section;
+    for (;;) {
+        int result = tgpt_section_read(blob, size, &cursor, scale_name, &scale_section);
+        if (result > 0) {
+            break;
+        }
+        if (result == 0) {
+            return -1;
+        }
+    }
+    if (scale_section.dtype != TGPT_DTYPE_F32 || scale_section.bytes != rows * sizeof(float)) {
+        return -1;
+    }
+    *codes = (const i8 *)codes_section.data;
+    *scales = (const float *)scale_section.data;
+    return 0;
+}
+
 static int tgpt_build_name(char *buffer, int capacity, int layer, const char *suffix) {
     return ksnprintf(buffer, (usize)capacity, "h.%d.%s", layer, suffix);
+}
+
+int tgpt_model_header(struct tgpt_model *model, const void *blob, u64 size) {
+    const u8 *source = (const u8 *)blob;
+    if (model == NULL || blob == NULL || size < TGPT_HEADER_BYTES) {
+        return -1;
+    }
+    if (memcmp(source, "TGPTBIN1", 8) != 0) {
+        return -1;
+    }
+    u32 header[8];
+    memcpy(header, source + 8, 32);
+    model->n_layer = (int)header[1];
+    model->n_head = (int)header[2];
+    model->n_embd = (int)header[3];
+    model->n_ctx = (int)header[4];
+    model->n_vocab = (int)header[5];
+    model->n_inner = (int)header[6];
+    if (model->n_layer < 1 || model->n_layer > TGPT_MAX_LAYERS || model->n_head < 1 || model->n_embd < 1) {
+        return -1;
+    }
+    model->head_dim = model->n_embd / model->n_head;
+    if (model->head_dim * model->n_head != model->n_embd) {
+        return -1;
+    }
+    if (half_prepare() != 0) {
+        return -1;
+    }
+    return 0;
 }
 
 int tgpt_model_attach(struct tgpt_model *model, const void *blob, u64 size) {
@@ -313,11 +480,13 @@ int tgpt_state_open(struct tgpt_state *state, const struct tgpt_model *model) {
     state->ff = (float *)kmalloc((usize)model->n_inner * sizeof(float));
     state->logits = (float *)kmalloc((usize)model->n_vocab * sizeof(float));
     state->scores = (float *)kmalloc((usize)context * sizeof(float));
+    state->quant_buffer = (i8 *)kmalloc((usize)model->n_inner * sizeof(i8));
     if (state->x == NULL || state->h == NULL || state->qkv == NULL || state->attn == NULL ||
-        state->ff == NULL || state->logits == NULL || state->scores == NULL) {
+        state->ff == NULL || state->logits == NULL || state->scores == NULL || state->quant_buffer == NULL) {
         tgpt_state_close(state);
         return -1;
     }
+    tgpt_profile_reset(&state->profile);
     u64 elements = (u64)model->n_layer * (u64)context * (u64)model->n_embd;
     u64 pages = (elements * sizeof(float) + PAGE_SIZE - 1) / PAGE_SIZE;
     u64 key_block = pmm_alloc_contiguous((u32)pages);
@@ -368,6 +537,9 @@ void tgpt_state_close(struct tgpt_state *state) {
     }
     if (state->scores) {
         kfree(state->scores);
+    }
+    if (state->quant_buffer) {
+        kfree(state->quant_buffer);
     }
     memset(state, 0, sizeof(*state));
 }
@@ -505,23 +677,104 @@ int tgpt_vocab_decode(const struct tgpt_vocab *vocab, int id, char *output, int 
     return (int)length;
 }
 
+int tgpt_model_quantize(struct tgpt_model *model, const void *blob, u64 size) {
+    const u8 *source = (const u8 *)blob;
+    char name[96];
+    if (model == NULL || blob == NULL || size < TGPT_HEADER_BYTES) {
+        return -1;
+    }
+    if (memcmp(source, "TGPTBIN1", 8) != 0) {
+        return -1;
+    }
+    model->wpe = tgpt_tensor(source, size, "wpe.weight", (u64)model->n_ctx * model->n_embd);
+    model->lnf_w = tgpt_tensor(source, size, "ln_f.weight", (u64)model->n_embd);
+    model->lnf_b = tgpt_tensor(source, size, "ln_f.bias", (u64)model->n_embd);
+    if (model->wpe == NULL || model->lnf_w == NULL || model->lnf_b == NULL) {
+        return -1;
+    }
+    model->wte = tgpt_tensor(source, size, "wte.weight", (u64)model->n_vocab * model->n_embd);
+    if (model->wte == NULL) {
+        return -1;
+    }
+    for (int layer = 0; layer < model->n_layer; layer++) {
+        struct tgpt_layer *entry = &model->layers[layer];
+        tgpt_build_name(name, (int)sizeof(name), layer, "ln_1.weight");
+        entry->ln1_w = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        tgpt_build_name(name, (int)sizeof(name), layer, "ln_1.bias");
+        entry->ln1_b = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        tgpt_build_name(name, (int)sizeof(name), layer, "ln_2.weight");
+        entry->ln2_w = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        tgpt_build_name(name, (int)sizeof(name), layer, "ln_2.bias");
+        entry->ln2_b = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        tgpt_build_name(name, (int)sizeof(name), layer, "attn.c_attn.bias");
+        entry->qkv_b = tgpt_tensor(source, size, name, (u64)model->n_embd * 3);
+        tgpt_build_name(name, (int)sizeof(name), layer, "attn.c_proj.bias");
+        entry->proj_b = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        tgpt_build_name(name, (int)sizeof(name), layer, "mlp.c_fc.bias");
+        entry->fc_b = tgpt_tensor(source, size, name, (u64)model->n_inner);
+        tgpt_build_name(name, (int)sizeof(name), layer, "mlp.c_proj.bias");
+        entry->ff_b = tgpt_tensor(source, size, name, (u64)model->n_embd);
+        if (entry->ln1_w == NULL || entry->ln1_b == NULL || entry->ln2_w == NULL || entry->ln2_b == NULL ||
+            entry->qkv_b == NULL || entry->proj_b == NULL || entry->fc_b == NULL || entry->ff_b == NULL) {
+            return -1;
+        }
+        tgpt_build_name(name, (int)sizeof(name), layer, "attn.c_attn.weight");
+        if (tgpt_tensor_q8(source, size, name, (u64)model->n_embd * 3, (u64)model->n_embd, &entry->qkv_q,
+                           &entry->qkv_scale) != 0) {
+            return -1;
+        }
+        tgpt_build_name(name, (int)sizeof(name), layer, "attn.c_proj.weight");
+        if (tgpt_tensor_q8(source, size, name, (u64)model->n_embd, (u64)model->n_embd, &entry->proj_q,
+                           &entry->proj_scale) != 0) {
+            return -1;
+        }
+        tgpt_build_name(name, (int)sizeof(name), layer, "mlp.c_fc.weight");
+        if (tgpt_tensor_q8(source, size, name, (u64)model->n_inner, (u64)model->n_embd, &entry->fc_q,
+                           &entry->fc_scale) != 0) {
+            return -1;
+        }
+        tgpt_build_name(name, (int)sizeof(name), layer, "mlp.c_proj.weight");
+        if (tgpt_tensor_q8(source, size, name, (u64)model->n_embd, (u64)model->n_inner, &entry->ff_q,
+                           &entry->ff_scale) != 0) {
+            return -1;
+        }
+    }
+    model->quantized = 1;
+    return 0;
+}
 int tgpt_forward(struct tgpt_model *model, struct tgpt_state *state, int token, int position) {
     if (token < 0 || token >= model->n_vocab || position < 0 || position >= state->cache_ctx) {
         return -1;
     }
+    struct tgpt_profile *profile = &state->profile;
     int embd = model->n_embd;
     int heads = model->n_head;
     int dim = model->head_dim;
     int context = state->cache_ctx;
-    const u16 *token_row = model->wte + (u64)token * embd;
+    int quantized = model->quantized != 0;
+    float vector_scale = 0.0f;
+    u64 mark = tgpt_rdtsc();
+    u64 tsc = mark;
     const u16 *position_row = model->wpe + (u64)position * embd;
+    const u16 *token_row = model->wte + (u64)token * embd;
     for (int index = 0; index < embd; index++) {
         state->x[index] = half_to_float(token_row[index]) + half_to_float(position_row[index]);
     }
+    profile->embed_cycles += tgpt_rdtsc() - tsc;
     for (int layer = 0; layer < model->n_layer; layer++) {
         const struct tgpt_layer *entry = &model->layers[layer];
+        tsc = tgpt_rdtsc();
         tgpt_layernorm(state->h, state->x, entry->ln1_w, entry->ln1_b, embd);
-        tgpt_matvec(state->h, entry->qkv_w, 3 * embd, embd, state->qkv);
+        profile->ln1_cycles += tgpt_rdtsc() - tsc;
+        tsc = tgpt_rdtsc();
+        if (quantized) {
+            tgpt_quantize_vector(state->h, state->quant_buffer, embd, &vector_scale);
+            tgpt_matvec_q8(state->quant_buffer, vector_scale, entry->qkv_q, entry->qkv_scale, 3 * embd, embd,
+                           state->qkv);
+        } else {
+            tgpt_matvec(state->h, entry->qkv_w, 3 * embd, embd, state->qkv);
+        }
+        profile->qkv_cycles += tgpt_rdtsc() - tsc;
         for (int index = 0; index < 3 * embd; index++) {
             state->qkv[index] += half_to_float(entry->qkv_b[index]);
         }
@@ -533,6 +786,7 @@ int tgpt_forward(struct tgpt_model *model, struct tgpt_state *state, int token, 
         float *value_slot = state->v_cache + base + (u64)position * embd;
         memcpy(key_slot, key, (usize)embd * sizeof(float));
         memcpy(value_slot, value, (usize)embd * sizeof(float));
+        tsc = tgpt_rdtsc();
         float scale = 1.0f / tgpt_sqrt((float)dim);
         for (int head = 0; head < heads; head++) {
             const float *query_head = query + head * dim;
@@ -558,25 +812,57 @@ int tgpt_forward(struct tgpt_model *model, struct tgpt_state *state, int token, 
                 }
             }
         }
-        tgpt_matvec(state->attn, entry->proj_w, embd, embd, state->h);
+        profile->attn_cycles += tgpt_rdtsc() - tsc;
+        tsc = tgpt_rdtsc();
+        if (quantized) {
+            tgpt_quantize_vector(state->attn, state->quant_buffer, embd, &vector_scale);
+            tgpt_matvec_q8(state->quant_buffer, vector_scale, entry->proj_q, entry->proj_scale, embd, embd,
+                           state->h);
+        } else {
+            tgpt_matvec(state->attn, entry->proj_w, embd, embd, state->h);
+        }
+        profile->proj_cycles += tgpt_rdtsc() - tsc;
         for (int index = 0; index < embd; index++) {
             state->x[index] += state->h[index] + half_to_float(entry->proj_b[index]);
         }
+        tsc = tgpt_rdtsc();
         tgpt_layernorm(state->h, state->x, entry->ln2_w, entry->ln2_b, embd);
-        tgpt_matvec(state->h, entry->fc_w, model->n_inner, embd, state->ff);
+        if (quantized) {
+            tgpt_quantize_vector(state->h, state->quant_buffer, embd, &vector_scale);
+            tgpt_matvec_q8(state->quant_buffer, vector_scale, entry->fc_q, entry->fc_scale, model->n_inner, embd,
+                           state->ff);
+        } else {
+            tgpt_matvec(state->h, entry->fc_w, model->n_inner, embd, state->ff);
+        }
         for (int index = 0; index < model->n_inner; index++) {
             state->ff[index] += half_to_float(entry->fc_b[index]);
         }
         tgpt_gelu(state->ff, model->n_inner);
-        tgpt_matvec(state->ff, entry->ff_w, embd, model->n_inner, state->h);
+        if (quantized) {
+            tgpt_quantize_vector(state->ff, state->quant_buffer, model->n_inner, &vector_scale);
+            tgpt_matvec_q8(state->quant_buffer, vector_scale, entry->ff_q, entry->ff_scale, embd, model->n_inner,
+                           state->h);
+        } else {
+            tgpt_matvec(state->ff, entry->ff_w, embd, model->n_inner, state->h);
+        }
+        profile->ffn_cycles += tgpt_rdtsc() - tsc;
         for (int index = 0; index < embd; index++) {
             state->x[index] += state->h[index] + half_to_float(entry->ff_b[index]);
         }
     }
+    tsc = tgpt_rdtsc();
     tgpt_layernorm(state->h, state->x, model->lnf_w, model->lnf_b, embd);
-    tgpt_matvec(state->h, model->wte, model->n_vocab, embd, state->logits);
+    if (quantized) {
+        tgpt_matvec_nt(state->h, model->wte, model->n_vocab, embd, state->logits);
+    } else {
+        tgpt_matvec(state->h, model->wte, model->n_vocab, embd, state->logits);
+    }
+    profile->logits_cycles += tgpt_rdtsc() - tsc;
+    profile->forward_calls++;
+    profile->total_cycles += tgpt_rdtsc() - mark;
     return 0;
 }
+
 
 int tgpt_greedy(struct tgpt_model *model, struct tgpt_state *state) {
     int best = 0;

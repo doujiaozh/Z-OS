@@ -1404,14 +1404,32 @@ static void command_gpt(int argc, char *arguments[]) {
     }
     void *weights = NULL;
     u64 weights_size = 0;
+    void *int8_weights = NULL;
+    u64 int8_size = 0;
+    int use_int8 = 0;
     u64 start = timer_uptime_ms();
-    int result = zdisk_load("WEIGHTS.BIN", &weights, &weights_size);
-    u64 load_ms = timer_uptime_ms() - start;
-    if (result != ZDISK_ERROR_NONE) {
-        kprintf("gpt: weight load failed (%s)\n", zdisk_error_text(result));
-        return;
+    int result = ZDISK_ERROR_NONE;
+    if (zdisk_lookup("WEIGHTS.Q8") != NULL) {
+        result = zdisk_load("WEIGHTS.Q8", &int8_weights, &int8_size);
+        if (result == ZDISK_ERROR_NONE) {
+            use_int8 = 1;
+        } else {
+            kprintf("gpt: int8 load failed (%s)\n", zdisk_error_text(result));
+        }
     }
-    kprintf("gpt: weights %llu bytes loaded in %llu ms\n", weights_size, load_ms);
+    if (!use_int8) {
+        result = zdisk_load("WEIGHTS.BIN", &weights, &weights_size);
+        if (result != ZDISK_ERROR_NONE) {
+            kprintf("gpt: weight load failed (%s)\n", zdisk_error_text(result));
+            return;
+        }
+    }
+    u64 load_ms = timer_uptime_ms() - start;
+    if (use_int8) {
+        kprintf("gpt: int8 weights %llu bytes loaded in %llu ms\n", int8_size, load_ms);
+    } else {
+        kprintf("gpt: fp16 weights %llu bytes loaded in %llu ms\n", weights_size, load_ms);
+    }
     void *vocabulary = NULL;
     u64 vocabulary_size = 0;
     result = zdisk_load("VOCAB.BIN", &vocabulary, &vocabulary_size);
@@ -1421,9 +1439,20 @@ static void command_gpt(int argc, char *arguments[]) {
     }
     kprintf("gpt: vocab %llu bytes loaded\n", vocabulary_size);
     struct tgpt_model model;
-    if (tgpt_model_attach(&model, weights, weights_size) != 0) {
-        kprintf("gpt: model header rejected\n");
-        return;
+    if (use_int8) {
+        if (tgpt_model_header(&model, int8_weights, int8_size) != 0) {
+            kprintf("gpt: model header rejected\n");
+            return;
+        }
+        if (tgpt_model_quantize(&model, int8_weights, int8_size) != 0) {
+            kprintf("gpt: int8 binding failed\n");
+            return;
+        }
+    } else {
+        if (tgpt_model_attach(&model, weights, weights_size) != 0) {
+            kprintf("gpt: model header rejected\n");
+            return;
+        }
     }
     kprintf("gpt: model layers=%d heads=%d embd=%d ctx=%d vocab=%d inner=%d\n",
             model.n_layer, model.n_head, model.n_embd, model.n_ctx, model.n_vocab, model.n_inner);
@@ -1443,6 +1472,7 @@ static void command_gpt(int argc, char *arguments[]) {
     u64 inference_start = timer_uptime_ms();
     result = tgpt_generate(&model, &state, &vocab, prompt, tokens, generated, TGPT_MAX_OUTPUT, &produced);
     u64 inference_ms = timer_uptime_ms() - inference_start;
+    struct tgpt_profile profile = state.profile;
     tgpt_state_close(&state);
     if (result != 0) {
         kprintf("gpt: generation failed\n");
@@ -1457,6 +1487,18 @@ static void command_gpt(int argc, char *arguments[]) {
         kprintf("gpt: ms_per_token %llu\n", ms_per_token);
         kprintf("gpt: tokens_per_second_milli %llu\n", rate_thousandths);
         kprintf("gpt: tokens_per_hour %llu\n", (u64)produced * 3600000ULL / inference_ms);
+    }
+    if (profile.forward_calls > 0) {
+        u64 calls = profile.forward_calls;
+        kprintf("gpt: path %s forwards %llu\n", use_int8 ? "int8" : "fp16", calls);
+        kprintf("gpt: cyc_embed %llu\n", profile.embed_cycles / calls);
+        kprintf("gpt: cyc_ln1 %llu\n", profile.ln1_cycles / calls);
+        kprintf("gpt: cyc_qkv %llu\n", profile.qkv_cycles / calls);
+        kprintf("gpt: cyc_attn %llu\n", profile.attn_cycles / calls);
+        kprintf("gpt: cyc_proj %llu\n", profile.proj_cycles / calls);
+        kprintf("gpt: cyc_ffn %llu\n", profile.ffn_cycles / calls);
+        kprintf("gpt: cyc_logits %llu\n", profile.logits_cycles / calls);
+        kprintf("gpt: cyc_total %llu\n", profile.total_cycles / calls);
     }
     kprintf("gpt: output %s\n", generated);
 }

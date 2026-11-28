@@ -35,3 +35,5 @@ CMakeFiles/
 *.exp
 /out/
 disk/
+tools/probe_boot.py
+tools/run_qemu.py

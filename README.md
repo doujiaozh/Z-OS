@@ -487,6 +487,56 @@ Reference result for the prompt above is the sequence 407 1865 1598 13 198,
 which decodes to " not yet clear." followed by newlines. The same sequence is
 produced by the PyTorch reference implementation over the same FP16 weights.
 
+## Inference performance work
+
+Three optimisations were evaluated against the FP16 scalar path.
+
+### Phase profiling
+
+kernel/ai/tgpt.c reads the timestamp counter with rdtsc around the embedding,
+the first LayerNorm, the QKV projection, the attention block, the output
+projection, the feed forward block and the final logits. tgpt gpt reports the
+per forward cycle counts as cyc_embed, cyc_ln1, cyc_qkv, cyc_attn, cyc_proj,
+cyc_ffn, cyc_logits and cyc_total.
+
+### INT8 quantisation
+
+tools/mkdisk.py writes WEIGHTS.Q8 next to WEIGHTS.BIN. Every linear weight is
+quantised per output row with a symmetric int8 range and a float32 scale vector
+stored as a separate NAME.q8scale tensor. The kernel quantises each activation
+vector on the fly and accumulates int32 dot products, then rescales with the row
+scale and the activation scale recorded at the start of the command.
+
+The output head and the token embedding are deliberately left in FP16. Quantising
+the tied embedding matrix perturbs the argmax and changes the generated tokens,
+so the head keeps the FP16 path while the transformer body runs INT8.
+
+Verified result for gpt 8 with the reference prompt:
+
+| Path | Tokens | Elapsed | Per token | Output |
+| --- | --- | --- | --- | --- |
+| FP16 scalar | 8 | 102440 ms | 12805 ms | not yet clear. |
+| INT8 body | 8 | 47960 ms | 5995 ms | not yet clear. |
+
+The INT8 path keeps the reference token sequence and roughly halves the
+inference time. The disk image grows because both weight files are present.
+
+### Loop order and cache behaviour
+
+The scalar matrix vector kernel accumulates four partial sums per row so that
+independent multiply add chains overlap, and the Q8 kernel accumulates in int32
+with the scale applied once per row. K and V cache writes stay contiguous in the
+embd dimension so that attention reads stream sequentially.
+
+### Multiprocessor status
+
+The kernel currently boots on the boot processor only. There is no APIC, no
+Application Processor startup trampoline and no per core scheduler in this
+tree, so heads cannot be spread across cores yet. Adding SMP requires
+enumerating the APIC identifiers, issuing INIT and STARTUP IPIs, initialising a
+per core GDT, TSS and stack, and extending the run queue. This is recorded as
+future work rather than attempted here.
+
 ## Repository layout
 
 ```text

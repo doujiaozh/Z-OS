@@ -98,6 +98,54 @@ def build_vocab(source, destination):
     return destination
 
 
+def quantize_weights(source, destination):
+    if destination.exists() and destination.stat().st_size > 80 * 1024 * 1024:
+        print("int8 weights present", destination.stat().st_size, flush=True)
+        return destination
+    sections = []
+    with open(source, "rb") as handle:
+        magic = handle.read(8)
+        header_fixed = handle.read(32)
+        count = struct.unpack("<8I", header_fixed)[7]
+        for _ in range(count):
+            name_length = struct.unpack("<I", handle.read(4))[0]
+            name = handle.read(name_length)
+            ndim = struct.unpack("<I", handle.read(4))[0]
+            dims = [struct.unpack("<Q", handle.read(8))[0] for _ in range(ndim)]
+            dtype = struct.unpack("<I", handle.read(4))[0]
+            nbytes = struct.unpack("<Q", handle.read(8))[0]
+            raw = handle.read(nbytes)
+            data = np.frombuffer(raw, dtype="<f2").astype(np.float32)
+            matrix_mode = ndim == 2 and name not in (b"wte.weight", b"wpe.weight")
+            if not matrix_mode:
+                sections.append((name, [int(value) for value in dims], 1, raw))
+                continue
+            matrix = data.reshape(tuple(dims))
+            peak = np.abs(matrix).max(axis=1)
+            scale = np.where(peak > 0, peak / 127.0, 1e-8).astype(np.float32)
+            codes = np.clip(np.rint(matrix / scale[:, None]), -127, 127).astype(np.int8)
+            sections.append((name, [int(dims[0]), int(dims[1])], 2, codes.tobytes()))
+            sections.append((name + b".q8scale", [int(dims[0]), 1], 0, scale.tobytes()))
+    config = struct.unpack("<8I", header_fixed)
+    output = destination.with_suffix(".part")
+    with open(output, "wb") as target:
+        target.write(b"TGPTBIN1")
+        target.write(struct.pack("<8I", config[0], config[1], config[2], config[3], config[4], config[5],
+                                 config[6], len(sections)))
+        for name, dims, dtype, payload in sections:
+            target.write(struct.pack("<I", len(name)))
+            target.write(name)
+            target.write(struct.pack("<I", len(dims)))
+            for value in dims:
+                target.write(struct.pack("<Q", value))
+            target.write(struct.pack("<I", dtype))
+            target.write(struct.pack("<Q", len(payload)))
+            target.write(payload)
+    os.replace(output, destination)
+    print("int8 weights written", destination, destination.stat().st_size, "bytes", len(sections), "sections", flush=True)
+    return destination
+
+
 def build_directory(files):
     entries = []
     lba = None
@@ -143,8 +191,11 @@ def main():
         raise SystemExit("missing vocab.json at " + str(vocab_source))
     vocab_binary = DISK / "vocab.bin"
     build_vocab(vocab_source, vocab_binary)
+    weights_int8 = DISK / "weights.q8"
+    quantize_weights(weights_fp16, weights_int8)
     payloads = []
     payloads.append(("WEIGHTS.BIN", weights_fp16))
+    payloads.append(("WEIGHTS.Q8", weights_int8))
     payloads.append(("VOCAB.BIN", vocab_binary))
     note = DISK / "hd_note.txt"
     note.write_bytes(b"Z-OS large weight loading test payload\n")
