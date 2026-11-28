@@ -41,18 +41,21 @@ def convert_weights(source, destination):
             target.write(struct.pack("<I", name_length))
             target.write(name)
             ndim = struct.unpack("<I", handle.read(4))[0]
-            target.write(struct.pack("<I", ndim))
             dims = []
             for _ in range(ndim):
-                value = struct.unpack("<Q", handle.read(8))[0]
-                dims.append(value)
-                target.write(struct.pack("<Q", value))
+                dims.append(struct.unpack("<Q", handle.read(8))[0])
             dtype = struct.unpack("<I", handle.read(4))[0]
             nbytes = struct.unpack("<Q", handle.read(8))[0]
             if dtype != 0:
                 raise SystemExit("unexpected dtype")
-            data = np.fromfile(handle, dtype="<f4", count=nbytes // 4)
+            data = np.fromfile(handle, dtype="<f4", count=nbytes // 4).reshape(tuple(dims))
+            if len(dims) == 2 and name not in (b"wte.weight", b"wpe.weight"):
+                data = np.ascontiguousarray(data.T)
+                dims = [dims[1], dims[0]]
             half = data.astype("<f2").tobytes()
+            target.write(struct.pack("<I", ndim))
+            for value in dims:
+                target.write(struct.pack("<Q", value))
             target.write(struct.pack("<I", 1))
             target.write(struct.pack("<Q", len(half)))
             target.write(half)
@@ -62,6 +65,36 @@ def convert_weights(source, destination):
                 print("converted", tensors, count, total, flush=True)
     os.replace(output, destination)
     print("fp16 weights written", destination, destination.stat().st_size, "bytes", flush=True)
+    return destination
+
+
+def build_vocab(source, destination):
+    import json
+    vocabulary = json.load(open(source, encoding="utf-8"))
+    order = list(range(ord("!"), ord("~") + 1)) + list(range(0xA1, 0xAD)) + list(range(0xAE, 0x100))
+    codes = order[:]
+    extra = 0
+    for byte in range(256):
+        if byte not in order:
+            order.append(byte)
+            codes.append(256 + extra)
+            extra += 1
+    decode_map = {chr(code): byte for byte, code in zip(order, codes)}
+    inverse = {identifier: token for token, identifier in vocabulary.items()}
+    blobs = []
+    for identifier in range(50257):
+        token = inverse[identifier]
+        blobs.append(bytes(decode_map[character] for character in token))
+    table = bytearray()
+    payload = bytearray()
+    offset = 0
+    for blob in blobs:
+        table += struct.pack("<II", offset, len(blob))
+        payload += blob
+        offset += len(blob)
+    header = struct.pack("<8sII", b"VOCB0001", len(blobs), len(payload))
+    destination.write_bytes(header + bytes(table) + bytes(payload))
+    print("vocab bytes", destination.stat().st_size, "tokens", len(blobs), flush=True)
     return destination
 
 
@@ -105,8 +138,14 @@ def main():
         raise SystemExit("missing model.bin at " + str(weights_source))
     weights_fp16 = DISK / "weights.f16"
     convert_weights(weights_source, weights_fp16)
+    vocab_source = ASSETS / "vocab.json"
+    if not vocab_source.exists():
+        raise SystemExit("missing vocab.json at " + str(vocab_source))
+    vocab_binary = DISK / "vocab.bin"
+    build_vocab(vocab_source, vocab_binary)
     payloads = []
     payloads.append(("WEIGHTS.BIN", weights_fp16))
+    payloads.append(("VOCAB.BIN", vocab_binary))
     note = DISK / "hd_note.txt"
     note.write_bytes(b"Z-OS large weight loading test payload\n")
     payloads.append(("NOTE.TXT", note))

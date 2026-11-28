@@ -448,6 +448,45 @@ eight bytes of the payload, the TGPTBIN1 header fields and an FNV-1a checksum.
 The reference checksum of the converted FP16 weights is b2615498d2e5f7a3 over
 163828864 bytes.
 
+## On-device TinyGPT inference
+
+Kernel/ai contains a small transformer interpreter that runs distilgpt2 straight
+out of the ZDISK partition. The loader keeps the FP16 weight block in one
+contiguous physical run, so the model structure points at that block and no
+copy is performed.
+
+- kernel/ai/tgpt.c parses the TGPTBIN1 header, binds every tensor by name into
+  a layer table, and runs the decoder stack with LayerNorm, multi-head attention
+  with a KV cache, GELU feed forward, residual connections and a tied output
+  head.
+- kernel/ai/tgpt.c also implements the GPT-2 vocabulary. VOCAB.BIN stores a
+  50257 entry offset table and the raw byte strings. Encoding uses longest
+  match over bytes, which reproduces the official BPE ids for the test prompts.
+- The ai directory is compiled with SSE enabled while the rest of the kernel
+  keeps its general purpose build, because the kernel returns floats through
+  vector registers.
+
+Build the disk image and run inference:
+
+```powershell
+python tools/mkdisk.py
+qemu-system-x86_64 -drive format=raw,file=disk/hd.img,if=ide,index=0,media=disk -boot c -m 256M -cpu max -display none -serial stdio
+```
+
+Inside the shell:
+
+```text
+gpt 8 The future of artificial intelligence is
+```
+
+The command loads WEIGHTS.BIN and VOCAB.BIN from ZDISK, prints the parsed model
+shape, runs greedy decoding and reports tokens, elapsed milliseconds,
+milliseconds per token and the generated text.
+
+Reference result for the prompt above is the sequence 407 1865 1598 13 198,
+which decodes to " not yet clear." followed by newlines. The same sequence is
+produced by the PyTorch reference implementation over the same FP16 weights.
+
 ## Repository layout
 
 ```text

@@ -41,6 +41,7 @@
 #include "wm.h"
 #include "zfs.h"
 #include "zdisk.h"
+#include "tgpt.h"
 
 #define SHELL_LINE_MAX 256
 #define SHELL_ARG_MAX 16
@@ -237,6 +238,7 @@ static void command_help(void) {
     kprintf("  gfx [demo|test|off]  framebuffer, gfx and window manager control\n");
     kprintf("  diskinfo             ata block device and zfs status\n");
     kprintf("  hdload [name]        load a zdisk file into physical memory\n");
+    kprintf("  gpt [prompt] [n]     run TinyGPT inference from zdisk weights\n");
     kprintf("  format               format the ata disk with zfs\n");
     kprintf("  zmount               mount zfs and populate /disk\n");
     kprintf("  zls                  list zfs files on disk\n");
@@ -1379,6 +1381,83 @@ static void command_diskinfo(void) {
     kprintf("vfs /disk: %s\n", disk != NULL ? "present" : "absent");
 }
 
+static void command_gpt(int argc, char *arguments[]) {
+    if (!zdisk_mounted()) {
+        kprintf("gpt: zdisk not mounted\n");
+        return;
+    }
+    static char prompt_text[192];
+    const char *prompt = "The future of artificial intelligence is";
+    int tokens = 12;
+    if (argc > 1) {
+        int requested = atoi(arguments[1]);
+        if (requested > 0 && requested <= 64) {
+            tokens = requested;
+        }
+        if (argc > 2) {
+            join_arguments(argc, arguments, 2, prompt_text, sizeof(prompt_text), false);
+            prompt = prompt_text;
+        }
+    }
+    void *weights = NULL;
+    u64 weights_size = 0;
+    u64 start = timer_uptime_ms();
+    int result = zdisk_load("WEIGHTS.BIN", &weights, &weights_size);
+    u64 load_ms = timer_uptime_ms() - start;
+    if (result != ZDISK_ERROR_NONE) {
+        kprintf("gpt: weight load failed (%s)\n", zdisk_error_text(result));
+        return;
+    }
+    kprintf("gpt: weights %llu bytes loaded in %llu ms\n", weights_size, load_ms);
+    void *vocabulary = NULL;
+    u64 vocabulary_size = 0;
+    result = zdisk_load("VOCAB.BIN", &vocabulary, &vocabulary_size);
+    if (result != ZDISK_ERROR_NONE) {
+        kprintf("gpt: vocab load failed (%s)\n", zdisk_error_text(result));
+        return;
+    }
+    kprintf("gpt: vocab %llu bytes loaded\n", vocabulary_size);
+    struct tgpt_model model;
+    if (tgpt_model_attach(&model, weights, weights_size) != 0) {
+        kprintf("gpt: model header rejected\n");
+        return;
+    }
+    kprintf("gpt: model layers=%d heads=%d embd=%d ctx=%d vocab=%d inner=%d\n",
+            model.n_layer, model.n_head, model.n_embd, model.n_ctx, model.n_vocab, model.n_inner);
+    struct tgpt_vocab vocab;
+    if (tgpt_vocab_attach(&vocab, vocabulary, vocabulary_size) != 0) {
+        kprintf("gpt: vocab header rejected\n");
+        return;
+    }
+    kprintf("gpt: vocab tokens=%u\n", vocab.token_count);
+    struct tgpt_state state;
+    if (tgpt_state_open(&state, &model) != 0) {
+        kprintf("gpt: activation allocation failed\n");
+        return;
+    }
+    static char generated[TGPT_MAX_OUTPUT];
+    int produced = 0;
+    u64 inference_start = timer_uptime_ms();
+    result = tgpt_generate(&model, &state, &vocab, prompt, tokens, generated, TGPT_MAX_OUTPUT, &produced);
+    u64 inference_ms = timer_uptime_ms() - inference_start;
+    tgpt_state_close(&state);
+    if (result != 0) {
+        kprintf("gpt: generation failed\n");
+        return;
+    }
+    kprintf("gpt: prompt %s\n", prompt);
+    kprintf("gpt: tokens %d\n", produced);
+    kprintf("gpt: elapsed_ms %llu\n", inference_ms);
+    if (inference_ms > 0 && produced > 0) {
+        u64 ms_per_token = inference_ms / (u64)produced;
+        u64 rate_thousandths = (u64)produced * 1000000ULL / inference_ms;
+        kprintf("gpt: ms_per_token %llu\n", ms_per_token);
+        kprintf("gpt: tokens_per_second_milli %llu\n", rate_thousandths);
+        kprintf("gpt: tokens_per_hour %llu\n", (u64)produced * 3600000ULL / inference_ms);
+    }
+    kprintf("gpt: output %s\n", generated);
+}
+
 static void command_hdload(int argc, char *arguments[]) {
     if (!zdisk_mounted()) {
         kprintf("hdload: disk not mounted\n");
@@ -1730,6 +1809,8 @@ static void execute_command(int argc, char *arguments[]) {
         command_diskinfo();
     } else if (strcmp(command, "hdload") == 0) {
         command_hdload(argc, arguments);
+    } else if (strcmp(command, "gpt") == 0) {
+        command_gpt(argc, arguments);
     } else if (strcmp(command, "format") == 0) {
         command_format();
     } else if (strcmp(command, "zmount") == 0) {

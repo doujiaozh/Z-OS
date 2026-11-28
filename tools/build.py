@@ -9,7 +9,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BUILD = ROOT / "build"
-KERNEL_SECTORS = 640
+KERNEL_SECTORS = 960
 STAGE2_SECTORS = 32
 IMAGE_SIZE = 1474560
 KERNEL_LIMIT = KERNEL_SECTORS * 512
@@ -41,6 +41,7 @@ CFLAGS = [
     "-Ikernel/fs",
     "-Ikernel/drivers",
     "-Ikernel/net",
+    "-Ikernel/ai",
 ]
 USER_CFLAGS = [
     "--target=x86_64-none-elf",
@@ -103,11 +104,16 @@ def clean():
 def compile_kernel(tag, defines, extra_objects):
     nasm, clang, lld, objcopy = tools()
     objects = list(extra_objects)
+    ai_dir = ROOT / "kernel" / "ai"
     for source in sorted((ROOT / "kernel").rglob("*.c")):
         relative = source.relative_to(ROOT)
         obj = BUILD / tag / "obj" / relative.with_suffix(".o")
         obj.parent.mkdir(parents=True, exist_ok=True)
-        command = [clang] + CFLAGS + defines + ["-c", str(source), "-o", str(obj)]
+        flags = list(CFLAGS)
+        if ai_dir in source.parents:
+            flags = [flag for flag in flags if flag not in ("-mno-sse", "-mno-sse2")]
+            flags += ["-msse", "-msse2"]
+        command = [clang] + flags + defines + ["-c", str(source), "-o", str(obj)]
         run(command)
         objects.append(obj)
     asm_sources = sorted((ROOT / "kernel").rglob("*.asm"))
