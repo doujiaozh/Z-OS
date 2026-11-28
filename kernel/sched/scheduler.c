@@ -2,6 +2,7 @@
 #include "task.h"
 #include "thread.h"
 #include "gdt.h"
+#include "hal/hal.h"
 #include "heap.h"
 #include "io.h"
 #include "lib.h"
@@ -26,7 +27,6 @@ struct thread {
 
 extern u8 boot_stack[];
 extern u8 boot_stack_top[];
-extern void context_switch(u64 *old_stack, u64 new_stack);
 extern void thread_trampoline(void);
 
 static struct thread threads[MAX_THREADS];
@@ -65,7 +65,7 @@ static void switch_to(struct thread *next) {
     current_thread = next;
     current_slot = (u64)(next - threads);
     tss_set_rsp0(next->stack_top);
-    context_switch(&previous->rsp, next->rsp);
+    hal_context_switch(&previous->rsp, (usize)next->rsp);
 }
 
 void sched_init(void) {

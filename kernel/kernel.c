@@ -2,12 +2,10 @@
 #include "boot.h"
 #include "e1000.h"
 #include "console.h"
-#include "gdt.h"
+#include "hal/hal.h"
 #include "heap.h"
 #include "kstack.h"
 #include "protect.h"
-#include "interrupts.h"
-#include "io.h"
 #include "kernel.h"
 #include "keyboard.h"
 #include "mouse.h"
@@ -32,12 +30,13 @@
 #include "fb.h"
 
 void kmain(struct boot_info *boot) {
-    serial_init();
-    console_init();
-    console_set_color(COLOR_LIGHT_GREEN, COLOR_BLACK);
+    hal_early_init();
+    hal_console_init();
+    hal_console_set_color(COLOR_LIGHT_GREEN, COLOR_BLACK);
     kprintf("Z-OS %s %s\n", Z_OS_VERSION, Z_OS_CODENAME);
-    console_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
+    hal_console_set_color(COLOR_LIGHT_GREY, COLOR_BLACK);
     kprintf("64-bit kernel entered\n");
+    kprintf("HAL: %s (%s)\n", hal_name(), hal_cpu_name());
     if (boot == NULL || boot->magic != BOOTINFO_MAGIC) {
         panic("invalid boot information");
     }
@@ -46,17 +45,14 @@ void kmain(struct boot_info *boot) {
     }
     kprintf("BootInfo at %p, memory map entries: %u\n", boot, boot->entry_count);
 
-    u64 efer = read_msr(0xC0000080);
-    u64 cr4 = read_cr4();
-    if ((efer & 0x100) == 0 || (cr4 & 0x20) == 0) {
+    if (!hal_cpu_verify()) {
         panic("long mode state is invalid");
     }
     kprintf("Long mode: EFER.LME verified, CR4.PAE verified\n");
     security_init();
     security_init_canary();
 
-    gdt_init();
-    interrupts_init();
+    hal_trap_init();
     kprintf("GDT, TSS, IDT, and PIC initialized\n");
 
     pmm_init(boot);
@@ -103,7 +99,7 @@ void kmain(struct boot_info *boot) {
     serial_enable_rx_interrupt();
     pic_set_mask(PIC_IRQ_SERIAL, false);
 
-    interrupts_enable();
+    hal_irq_enable();
     kprintf("Interrupts enabled at %u Hz\n", timer_frequency());
 
     struct rtc_time time;

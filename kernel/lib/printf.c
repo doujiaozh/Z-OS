@@ -1,6 +1,6 @@
 #include "lib.h"
 #include "console.h"
-#include "io.h"
+#include "hal/hal.h"
 #include "string.h"
 
 struct output_state {
@@ -12,7 +12,7 @@ struct output_state {
 
 static void output_char(struct output_state *state, char character) {
     if (state->to_console) {
-        console_putc(character);
+        hal_console_putc(character);
     } else if (state->buffer != NULL && state->count + 1 < state->capacity) {
         state->buffer[state->count] = character;
     }
@@ -168,15 +168,17 @@ static void format_output(struct output_state *state, const char *format, __buil
             continue;
         }
         if (conversion == 'p') {
-            u64 value = (u64)__builtin_va_arg(arguments, void *);
-            usize padding = width > 18 ? width - 18 : 0;
+            void *pointer = __builtin_va_arg(arguments, void *);
+            u64 value = (u64)(usize)pointer;
+            usize digits = sizeof(void *) * 2;
+            usize padding = width > digits + 2 ? width - (digits + 2) : 0;
             if (!left_align) {
                 output_repeat(state, ' ', padding);
             }
             output_char(state, '0');
             output_char(state, 'x');
             bool started = false;
-            for (int shift = 60; shift >= 0; shift -= 4) {
+            for (int shift = (int)((sizeof(void *) * 8) - 4); shift >= 0; shift -= 4) {
                 u8 digit = (u8)((value >> shift) & 0xF);
                 if (digit != 0 || shift == 0) {
                     started = true;
@@ -229,25 +231,22 @@ usize kstrlen(const char *text) {
 }
 
 void kputs(const char *text) {
-    console_write(text);
+    hal_console_write(text);
 }
 
 void kputc(char character) {
-    console_putc(character);
+    hal_console_putc(character);
 }
 
 void halt_forever(void) {
-    interrupts_disable();
-    for (;;) {
-        cpu_halt();
-    }
+    hal_halt();
 }
 
 void panic(const char *message) {
-    interrupts_disable();
-    console_set_color(COLOR_WHITE, COLOR_RED);
+    hal_irq_disable();
+    hal_console_set_color(COLOR_WHITE, COLOR_RED);
     kprintf("\nPANIC: %s\n", message);
-    console_reset_color();
+    hal_console_reset_color();
     halt_forever();
 }
 

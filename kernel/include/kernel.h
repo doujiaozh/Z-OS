@@ -2,10 +2,7 @@
 #define Z_OS_KERNEL_H
 
 #include "types.h"
-
-#define Z_OS_NAME "Z-OS"
-#define Z_OS_VERSION "1.1.0"
-#define Z_OS_CODENAME "Hardening"
+#include "version.h"
 
 #define DISPLAY_MAX_DEVICES 8
 #define FRAMEBUFFER_FORMAT_UNKNOWN 0

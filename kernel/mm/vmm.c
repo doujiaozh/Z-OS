@@ -1,4 +1,5 @@
 #include "vmm.h"
+#include "hal/hal.h"
 #include "io.h"
 #include "lib.h"
 #include "pmm.h"
@@ -199,7 +200,7 @@ u64 vmm_high_pml4_entry(void) {
 }
 
 u64 vmm_pml4_phys(void) {
-    return read_cr3() & ADDRESS_MASK;
+    return hal_mmu_root() & ADDRESS_MASK;
 }
 
 int vmm_map_page(u64 virtual_address, u64 physical_address, u64 flags) {
@@ -549,13 +550,13 @@ int vmm_switch_address_space(const struct address_space *space) {
     if (space == NULL || !space->ready || (space->pml4_phys & (PAGE_SIZE - 1)) != 0) {
         return -1;
     }
-    write_cr3(space->pml4_phys);
+    hal_mmu_switch(space->pml4_phys);
     return 0;
 }
 
 void vmm_switch_kernel(void) {
     if (boot_pml4_physical != 0) {
-        write_cr3(boot_pml4_physical);
+        hal_mmu_switch(boot_pml4_physical);
     }
 }
 
