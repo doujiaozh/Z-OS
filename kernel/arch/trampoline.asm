@@ -157,6 +157,15 @@ kpti_probe_hit:
 kpti_probe_seen:
     dq 0
 
+global kpti_entry_counter
+global kpti_return_counter
+
+kpti_entry_counter:
+    dq 0
+
+kpti_return_counter:
+    dq 0
+
 kpti_stub_table:
 %assign stvec 0
 %rep 256

@@ -98,7 +98,8 @@ u64 interrupt_idt_base(void) {
 
 void interrupts_init(void) {
     for (u32 vector = 0; vector < 256; vector++) {
-        idt_set_gate((u8)vector, (u64)isr_stub_table[vector], GDT_KERNEL_CODE, 0x8E, vector == 8 ? 1 : 0);
+        idt_set_gate((u8)vector, (u64)isr_stub_table[vector], GDT_KERNEL_CODE, 0x8E,
+                     vector == 8 ? 1 : 0);
     }
     idt_set_gate(0x80, (u64)isr_stub_table[0x80], GDT_KERNEL_CODE, 0xEE, 0);
     idt_set_gate(0x81, (u64)(usize)kpti_probe_entry, GDT_KERNEL_CODE, 0x8E, 0);

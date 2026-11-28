@@ -2,6 +2,7 @@
 #include "io.h"
 #include "lib.h"
 #include "kpti.h"
+#include "kstack.h"
 #include "pmm.h"
 #include "spinlock.h"
 #include "string.h"
@@ -154,6 +155,20 @@ void vmm_init(void) {
     kprintf("VMM: PML4 at %p, identity map below 1 GiB\n", (void *)pml4);
     kprintf("VMM: shared kernel high-half direct map at %p\n", (void *)KERNEL_HIGH_BASE);
     kprintf("VMM: shared device window at %p\n", (void *)VMM_DEVICE_BASE);
+}
+
+void vmm_attach_kstack_window(u64 window_pd_physical) {
+    if (window_pd_physical == 0 || boot_pml4_physical == 0) {
+        return;
+    }
+    u64 *pml4 = (u64 *)boot_pml4_physical;
+    if ((pml4[511] & PTE_PRESENT) == 0 || (pml4[511] & PTE_HUGE) != 0) {
+        return;
+    }
+    u64 *high_pdpt = (u64 *)(pml4[511] & PTE_ADDRESS);
+    high_pdpt[KSTACK_WINDOW_PDPT_SLOT] = window_pd_physical | PTE_PRESENT | PTE_WRITABLE;
+    high_pml4_entry = pml4[511];
+    tlb_flush(KSTACK_WINDOW_BASE);
 }
 
 int vmm_map_device_page(u64 virtual_address, u64 physical_address, u64 flags) {

@@ -1,6 +1,6 @@
 # Z-OS Architecture
 
-This document describes the Z-OS 1.5.0 implementation as it exists in this
+This document describes the Z-OS 1.6.0 implementation as it exists in this
 repository. It distinguishes implemented mechanisms from planned work.
 
 ## Design goals
@@ -1155,43 +1155,31 @@ present, unit tested and ready for the next stage, which must rework the return
 path (dedicated per-CPU entry stack plus a stub owned frame) before enabling the
 live switch.
 
-## KPTI live isolation attempt (not delivered)
+## Kernel stack window and dual table frame page
 
-The v1.6.0 milestone attempted to enable live per-process CR3 switching with a
-dedicated entry stack and stub owned frames. The work was reverted after
-repeated failures; this section records what was tried and why it was not
-shipped.
+The guarded kernel stack allocator was reworked so its pages can be referenced
+from both page tables:
 
-Approaches attempted and their observed results:
+- The window lives in the kernel high half at `0xFFFFFFC040000000`, in its own
+  PML4 slot 511 and PDPT slot 257, with a dedicated page directory the kernel
+  owns. It never shares entries with the heap page directory range that process
+  address spaces mirror, which was the collision that broke page walks during
+  the first live isolation attempt.
+- Layout inside the window: offset 0 is an unmapped guard page, offsets
+  0x1000 to 0x4FFF are the entry stack used by the trampoline before any
+  process stack is usable, offset 0x5000 is the dual table frame page, and
+  slots start at 0x9000 with a guard page and ten pages per slot.
+- `vmm_attach_kstack_window` wires the window page directory into the kernel
+  PML4, so the kernel table maps it. Each per-process restricted view builds a
+  private high half whose PDPT slot 257 points at the same window page
+  directory, so the view maps exactly the entry stack, the frame page and the
+  stack slots and nothing else from the kernel.
+- Because the window is shared this way, the kernel stack of the running
+  process is addressable from the restricted view even though it is not
+  identity mapped, which removes the failure mode that forced the previous
+  milestone to keep isolation disabled.
 
-- Move every IDT gate into the trampoline section so the restricted view can
-  execute entry code. This alone was harmless, but any subsequent in-place
-  switch to a per-process view during activation left the kernel stack, the
-  interrupt frame and the return stack only reachable through tables the view
-  did not contain, so returns faulted and escalated to a triple fault.
-- Add an entry stub that copies the interrupt frame from the CPU stack into a
-  kernel stack referenced by a global slot. The copy itself worked, but the
-  process kernel stack pages are allocated through the guarded stack allocator
-  and are not identity mapped, so a restricted view that maps the stack window
-  by identity resolves nothing; mapping them through the kernel tables instead
-  made the guarded stack window overlap the heap page directory entries that
-  process address spaces share, which broke the page tables used by the
-  scheduler and produced page faults inside the kernel page walk.
-- Restore plain `iretq` and remove every CR3 switch to isolate the cause. The
-  kernel still faulted, which proved the failure was introduced by the address
-  space sharing change rather than by the trampoline, and the change was
-  reverted in full.
-
-Conclusion: enabling live per-process views requires reworking the memory
-layout first, specifically a kernel stack region that is identity mapped and
-separate from the heap page directory range, plus a return path whose frame
-lives on a page present in both tables. Those are layout changes, not switch
-changes, and they must land before any live switching is enabled. The kernel
-therefore keeps running every path on the full process page table; per-process
-views, the entry probe and the return trampoline remain available and unit
-tested as described in the previous section.
-
-## Console and shell
+## Console and shell## Console and shell
 
 The console driver writes VGA text memory and mirrors output to COM1. Newlines
 become CRLF on serial. A hardware cursor is updated through VGA I/O ports.

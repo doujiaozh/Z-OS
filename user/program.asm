@@ -15,6 +15,8 @@ global user_guitest2_start
 global user_guitest2_end
 global user_nettest2_start
 global user_nettest2_end
+global user_kptiprobe_start
+global user_kptiprobe_end
 global user_wget_start
 global user_wget_end
 
@@ -49,3 +51,7 @@ user_nettest2_end:
 user_wget_start:
     incbin "user_wget.elf"
 user_wget_end:
+
+user_kptiprobe_start:
+    incbin "user_kptiprobe.elf"
+user_kptiprobe_end:

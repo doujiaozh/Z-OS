@@ -149,7 +149,7 @@ def build_boot():
     return stage1, stage2
 
 
-USER_PROGRAMS = ["init", "multi", "forktest", "guitest", "postest", "guitest2", "nettest2", "wget"]
+USER_PROGRAMS = ["init", "multi", "forktest", "guitest", "postest", "guitest2", "nettest2", "wget", "kptiprobe"]
 
 
 def build_user():

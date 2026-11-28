@@ -1290,6 +1290,9 @@ static void command_hardening(void) {
             kpti_return_slot_value() != 0 ? "armed" : "inactive",
             (unsigned long long)kpti_entry_switch_count(),
             (unsigned long long)kpti_return_count());
+    kprintf("kpti stack window: %p entry stack: %p frame page: %p\n",
+            (void *)KSTACK_WINDOW_BASE, (void *)kstack_entry_stack_top(),
+            (void *)kstack_frame_page());
     kprintf("hardening kernel stacks used: %llu of %llu\n",
             (unsigned long long)kstack_used(), (unsigned long long)kstack_total());
 }

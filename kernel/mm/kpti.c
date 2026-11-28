@@ -71,35 +71,6 @@ static int map_view_page(u64 *direct_pd, u64 virtual_address, u64 physical_addre
     return 0;
 }
 
-static int map_sealed_pd_page(u64 *sealed_pd, u64 virtual_address, u64 physical_address,
-                              u64 flags) {
-    u32 pd_index = (u32)((virtual_address >> 21) & 0x1FF);
-    u32 pt_index = (u32)((virtual_address >> 12) & 0x1FF);
-    if (pd_index < VMM_HEAP_FIRST_PD) {
-        return -1;
-    }
-    u64 *page_table = NULL;
-    if ((sealed_pd[pd_index] & PTE_PRESENT) == 0) {
-        u64 frame = zeroed_frame();
-        if (frame == 0) {
-            return -1;
-        }
-        sealed_pd[pd_index] = frame | PTE_PRESENT | PTE_WRITABLE;
-        page_table = (u64 *)frame;
-    } else {
-        page_table = (u64 *)(sealed_pd[pd_index] & PTE_ADDRESS);
-    }
-    page_table[pt_index] = (physical_address & PTE_ADDRESS) |
-                           (flags & (0xFFF | PTE_NO_EXECUTE)) | PTE_PRESENT;
-    return 0;
-}
-
-static u64 current_stack_page(void) {
-    u64 stack_pointer = 0;
-    __asm__ volatile("mov %%rsp, %0" : "=r"(stack_pointer));
-    return page_down(stack_pointer);
-}
-
 static int seal_user_directory(u64 *sealed_pd, u64 source_pd_physical) {
     u64 *source = (u64 *)source_pd_physical;
     for (u32 index = 0; index < VMM_HEAP_FIRST_PD; index++) {
@@ -457,15 +428,6 @@ int kpti_build_process_view(struct address_space *space, u64 kernel_stack_base,
             flags = PTE_WRITABLE | PTE_NO_EXECUTE;
         }
         if (map_view_page(direct_pd, page, page, flags) != 0) {
-            shadow_table_count = saved_tables;
-            return -1;
-        }
-    }
-    u64 stack_window_pages = (u64)KSTACK_SLOT_COUNT * (KSTACK_MAX_PAGES + 1);
-    for (u64 index = 0; index < stack_window_pages; index++) {
-        u64 address = KSTACK_WINDOW_BASE + index * PAGE_SIZE;
-        if (map_sealed_pd_page((u64 *)user_pd_frame, address, address,
-                               PTE_WRITABLE | PTE_NO_EXECUTE) != 0) {
             shadow_table_count = saved_tables;
             return -1;
         }

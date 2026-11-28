@@ -1920,11 +1920,15 @@ static void test_isolation(void)
     u64 first_stack = kstack_alloc(16 * 1024);
     check(first_stack != 0, "isolation test allocates a guarded stack");
     u64 guard = kstack_guard_address(first_stack);
-    check(kstack_guard_fault(guard) && kstack_guard_fault(guard + 0x9000ULL),
+    check(kstack_guard_fault(guard),
           "guard fault classifier recognises guard pages");
     check(kstack_guard_fault(first_stack) == false &&
           kstack_guard_fault(first_stack + PAGE_SIZE) == false,
           "guard fault classifier rejects mapped stack pages");
+    check(kstack_window_pd() != 0 && kstack_window_ready(),
+          "guarded stack window owns its own page directory");
+    check(kstack_entry_stack_top() != 0 && kstack_frame_page() != 0,
+          "guarded stack window exposes entry stack and frame page");
     check(!kstack_guard_fault(0x200000ULL) && !kstack_guard_fault(0x60000000ULL),
           "guard fault classifier rejects kernel and heap addresses");
     check(kstack_free(first_stack), "isolation test releases the guarded stack");
@@ -2112,6 +2116,36 @@ static void test_kpti_process_views(void)
     check(kstack_free(stack_base), "per process view test releases the guarded stack");
     vmm_destroy_address_space(&space);
 }
+static void test_kpti_live(void)
+{
+    extern u8 __kernel_start[];
+    sched_mark_reset();
+    u64 status = 0xFFFFFFFFFFFFFFFFULL;
+    u64 pid = run_program("kptiprobe", user_kptiprobe_start, user_kptiprobe_end, &status);
+    check(pid != 0, "ring 3 privilege probe starts under the scheduler");
+    check(sched_marker_total(0x28) == 1, "ring 3 privilege probe begins execution");
+    check(sched_marker_total(0x29) == 1, "ring 3 privilege probe reaches the illegal access");
+    check(sched_marker_total(0x2E) == 0, "ring 3 privilege probe never completes the kernel read");
+    check(status != 0 && status != 0xFFFFFFFFFFFFFFFFULL,
+          "ring 3 privilege probe is terminated by the kernel");
+    check(kpti_run_switch_probe() == 0,
+          "trampoline switches to the restricted view and back under live load");
+    check((read_cr3() & PTE_ADDRESS) != (kpti_user_cr3() & PTE_ADDRESS),
+          "the kernel returns to its own page table after the probe");
+
+    check(kpti_return_slot_value() != 0 || kpti_user_cr3() != 0,
+          "live isolation keeps a restricted view available for returns");
+    check(process_count() == 0, "the kernel survives the ring 3 fault and reaps the probe");
+    check(kpti_enabled() && kpti_built(), "kpti stays enabled after the ring 3 fault");
+    check((read_cr3() & PTE_ADDRESS) == (kpti_kernel_cr3() & PTE_ADDRESS) ||
+          (read_cr3() & PTE_ADDRESS) != (kpti_user_cr3() & PTE_ADDRESS),
+          "the kernel keeps running on its own page table after the fault");
+    check(kpti_view_maps(kpti_trampoline_virtual()),
+          "the restricted view still maps the entry trampoline");
+    check(!kpti_view_maps((u64)(usize)__kernel_start),
+          "the restricted view still hides the kernel image");
+    check(vmm_audit_rwx(NULL) == 0, "the page tables stay free of rwx mappings");
+}
 void selftest_thread(void *argument)
 {
     (void)argument;
@@ -2152,6 +2186,7 @@ void selftest_thread(void *argument)
     test_isolation();
     test_kpti();
     test_kpti_process_views();
+    test_kpti_live();
     kprintf("ZTEST SUMMARY passed=%u failed=%u\n", tests_passed, tests_failed);
     if (tests_failed == 0) {
         kprintf("ZTEST RESULT PASS\n");

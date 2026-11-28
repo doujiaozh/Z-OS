@@ -23,6 +23,8 @@ extern u64 kpti_kernel_cr3_slot;
 extern u64 kpti_return_cr3_slot;
 extern u64 kpti_probe_hit;
 extern u64 kpti_probe_seen;
+extern u64 kpti_entry_counter;
+extern u64 kpti_return_counter;
 extern u8 kpti_return_stack[];
 extern u8 kpti_return_stack_top[];
 extern u64 kpti_probe_stack[];

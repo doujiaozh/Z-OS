@@ -51,7 +51,9 @@ network, TCP, internet, platform, desktop, buffering and VGA restore tests.
 | Guard pages, stack canaries, NX, W^X, poll | Implemented and verified | v1.1.0-hardening |
 | Restricted user view with entry trampoline | Implemented and verified | v1.4.0-kpti-part1 |
 | Per-process restricted views, entry and return trampolines | Implemented and unit tested | v1.5.0-kpti-part2 |
-| Live per-process CR3 switching, image KASLR, shadow stacks | Attempted, reverted, needs memory layout rework first | v1.6.0-live-isolation |
+| Kernel stack window in its own PML4 and PDPT slot, shared with restricted views | Implemented and verified | v1.6.0-live-isolation |
+| Ring 3 privilege violation captured without a kernel crash | Implemented and verified | v1.6.0-live-isolation |
+| Live per-process CR3 switching on every entry and return path, image KASLR, shadow stacks | Planned, next | v1.7.0-full-isolation |
 | File-descriptor table and syscall expansion | Planned | Phase 1 |
 | Static PIE relocation and dynamic user binaries | Later Phase 1 extension | Phase 1 |
 

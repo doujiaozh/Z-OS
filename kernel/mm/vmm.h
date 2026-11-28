@@ -54,6 +54,7 @@ int vmm_map_user_page(struct address_space *space, u64 virtual_address, u64 phys
 int vmm_unmap_user_page(struct address_space *space, u64 virtual_address);
 int vmm_map_device_page(u64 virtual_address, u64 physical_address, u64 flags);
 u64 vmm_device_base(void);
+void vmm_attach_kstack_window(u64 window_pd_physical);
 u64 vmm_user_physical(const struct address_space *space, u64 virtual_address);
 bool vmm_user_range_valid_in(const struct address_space *space, u64 address, u64 length);
 
