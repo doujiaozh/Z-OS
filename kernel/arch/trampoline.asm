@@ -15,6 +15,7 @@ global kpti_probe_stack_top
 global kpti_stub_table
 global kpti_return_stack
 global kpti_return_stack_top
+global kpti_frame_page_slot
 
 extern isr_common
 
@@ -59,23 +60,35 @@ kpti_probe_enter:
 
 kpti_return_to_user:
     test byte [rsp + 8], 3
-    jz .no_view
-    mov rax, [rel kpti_return_cr3_slot]
-    test rax, rax
-    jz .no_view
-    push rax
-    mov rax, [rel kpti_return_cr3_slot]
-    mov cr3, rax
-    pop rax
-.no_view:
+    jz .same_table
+    mov r11, [rel kpti_return_cr3_slot]
+    test r11, r11
+    jz .same_table
+    mov r10, [rel kpti_frame_page_slot]
+    test r10, r10
+    jz .same_table
+    cli
+    mov r9, [rsp]
+    mov [r10], r9
+    mov r9, [rsp + 8]
+    mov [r10 + 8], r9
+    mov r9, [rsp + 16]
+    mov [r10 + 16], r9
+    mov r9, [rsp + 24]
+    mov [r10 + 24], r9
+    mov r9, [rsp + 32]
+    mov [r10 + 32], r9
+    mov rsp, r10
+    mov cr3, r11
+    iretq
+.same_table:
     iretq
 
 %macro KPTI_SWITCH 0
-    mov rax, [rel kpti_kernel_cr3_slot]
-    mov rbx, cr3
-    cmp rax, rbx
-    je %%same
-    mov cr3, rax
+    mov r11, [rel kpti_kernel_cr3_slot]
+    test r11, r11
+    jz %%same
+    mov cr3, r11
 %%same:
 %endmacro
 
@@ -161,6 +174,9 @@ global kpti_entry_counter
 global kpti_return_counter
 
 kpti_entry_counter:
+    dq 0
+
+kpti_frame_page_slot:
     dq 0
 
 kpti_return_counter:

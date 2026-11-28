@@ -21,6 +21,7 @@ extern void kpti_probe_enter(u64 restricted_cr3, u64 kernel_cr3);
 extern void kpti_return_to_user(void);
 extern u64 kpti_kernel_cr3_slot;
 extern u64 kpti_return_cr3_slot;
+extern u64 kpti_frame_page_slot;
 extern u64 kpti_probe_hit;
 extern u64 kpti_probe_seen;
 extern u64 kpti_entry_counter;

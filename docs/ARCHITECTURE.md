@@ -1179,6 +1179,44 @@ from both page tables:
   identity mapped, which removes the failure mode that forced the previous
   milestone to keep isolation disabled.
 
+## KPTI step by step enablement status
+
+The milestone after the frame page rework attempted to enable the trampoline
+stubs gate by gate. Current state:
+
+- The guarded stack window now lives at 0xFFFFFFC040000000 in its own PML4 slot
+  511 and PDPT slot 257 with a kernel owned page directory, so it never collides
+  with the heap page directory range that process address spaces mirror. The
+  window holds a guard page, a four page entry stack, the dual table frame page
+  at offset 0x5000 and the guarded stack slots from 0x9000.
+- Each restricted view builds a private high half whose PDPT slot 257 points at
+  that shared window page directory, so the entry stack, the frame page and the
+  stack slots resolve on the restricted view as well.
+- `kpti_return_to_user` copies the tail of the interrupt frame onto the dual
+  table frame page, loads the restricted view CR3 and executes `iretq` from
+  there, with interrupts masked across the copy and the switch. The entry stubs
+  in the mapped trampoline section switch to the kernel table using only r11 so
+  the syscall number in rax survives.
+- The interrupt descriptor table keeps the original stubs for every vector and
+  routes only the system call gate 0x80 through the trampoline stub. That is
+  the configuration that passes all 513 checks.
+- Enabling the timer gate 0x20 through the trampoline stub was attempted and
+  reverted: with a preemptive timer interrupt delivering into a trampoline stub
+  while user code runs on the restricted view, the kernel faulted inside
+  memset on a kernel data page (CR3 still the restricted view, CR2 pointing at a
+  kernel static buffer) and escalated to a triple fault. The same class of
+  failure appeared when the exception gates 0x00 to 0x1F were routed through
+  the trampoline. Root cause is that the trampoline entry path switches CR3 but
+  the interrupted context can already be the restricted view while the handler
+  touches kernel data pages that the view does not map; mapping the whole
+  kernel image restored those pages but broke the high-half sharing invariant
+  the address space tests rely on, so that change was reverted as well.
+- Consequence: user processes still execute on the full process page table and
+  the restricted view is installed only by the probe paths and the return
+  trampoline. Per-process views, the entry probes, the frame page and the
+  guarded stack window are implemented and tested, but full gate coverage is
+  not enabled and must not be described as complete.
+
 ## Console and shell## Console and shell
 
 The console driver writes VGA text memory and mirrors output to COM1. Newlines

@@ -75,7 +75,11 @@ static void activate_process(struct process *process) {
     process_set_current(process);
     write_cr3(process->space.pml4_phys);
     tss_set_rsp0(process->kernel_stack_top);
-    kpti_clear_return_slot();
+    if (process->kpti_ready && process->kpti.built) {
+        kpti_blend_slots(process->space.pml4_phys, process->kpti.cr3);
+    } else {
+        kpti_clear_return_slot();
+    }
 }
 
 static bool batch_has_blocked_process(void) {

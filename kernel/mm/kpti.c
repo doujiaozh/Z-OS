@@ -2,6 +2,7 @@
 #include "gdt.h"
 #include "kstack.h"
 #include "interrupts.h"
+#include "kstack.h"
 #include "io.h"
 #include "lib.h"
 #include "pmm.h"
@@ -155,6 +156,16 @@ int kpti_build_view(void) {
             return -1;
         }
     }
+    u64 window_pd = kstack_window_pd();
+    if (window_pd != 0) {
+        u64 view_high_pdpt = zeroed_frame();
+        if (view_high_pdpt == 0) {
+            return -1;
+        }
+        u64 *view_pdpt = (u64 *)view_high_pdpt;
+        view_pdpt[KSTACK_WINDOW_PDPT_SLOT] = window_pd | PTE_PRESENT | PTE_WRITABLE;
+        pml4[511] = view_high_pdpt | PTE_PRESENT | PTE_WRITABLE;
+    }
     state.kernel_cr3 = kernel_pml4_physical;
     state.user_cr3 = shadow_pml4;
     state.shadow_pdpt = shadow_pdpt;
@@ -162,6 +173,7 @@ int kpti_build_view(void) {
     state.table_pages = 3 + shadow_table_count + 1;
     kpti_kernel_cr3_slot = kernel_pml4_physical;
     kpti_return_cr3_slot = shadow_pml4;
+    kpti_frame_page_slot = kstack_frame_page();
     state.built = true;
     state.enabled = true;
     return 0;
@@ -430,6 +442,20 @@ int kpti_build_process_view(struct address_space *space, u64 kernel_stack_base,
         if (map_view_page(direct_pd, page, page, flags) != 0) {
             shadow_table_count = saved_tables;
             return -1;
+        }
+    }
+    u64 process_window_pd = kstack_window_pd();
+    if (process_window_pd != 0) {
+        u64 process_high_pdpt = zeroed_frame();
+        if (process_high_pdpt == 0) {
+            shadow_table_count = saved_tables;
+            return -1;
+        }
+        u64 *process_pdpt = (u64 *)process_high_pdpt;
+        process_pdpt[KSTACK_WINDOW_PDPT_SLOT] = process_window_pd | PTE_PRESENT | PTE_WRITABLE;
+        pml4[511] = process_high_pdpt | PTE_PRESENT | PTE_WRITABLE;
+        if (view->frame_count < KPTI_VIEW_FRAMES) {
+            view->frames[view->frame_count++] = process_high_pdpt;
         }
     }
     (void)kernel_stack_base;

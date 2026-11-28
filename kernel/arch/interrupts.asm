@@ -66,7 +66,6 @@ STUB_NOERR vec
 
 extern interrupt_dispatch
 extern sched_interrupt_return
-extern kpti_return_cr3_slot
 
 global isr_common
 isr_common:

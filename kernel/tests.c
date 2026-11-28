@@ -2132,6 +2132,8 @@ static void test_kpti_live(void)
           "trampoline switches to the restricted view and back under live load");
     check((read_cr3() & PTE_ADDRESS) != (kpti_user_cr3() & PTE_ADDRESS),
           "the kernel returns to its own page table after the probe");
+    check(kpti_kernel_cr3() != kpti_user_cr3(),
+          "kernel and user page tables stay distinct after the probe runs");
 
     check(kpti_return_slot_value() != 0 || kpti_user_cr3() != 0,
           "live isolation keeps a restricted view available for returns");
